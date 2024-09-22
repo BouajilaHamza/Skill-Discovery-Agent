@@ -1,35 +1,27 @@
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-import torch
-from litserve import LitAPI, LitServer
+import litserve as ls
 
-class BERTLitAPI(LitAPI):
+class SimpleLitAPI(ls.LitAPI):
     def setup(self, device):
-        self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-        self.model = AutoModelForSequenceClassification.from_pretrained("bert-base-uncased")
-        self.model.to(device)
-        self.model.eval()
+        self.model1 = lambda x: x**2
+        self.model2 = lambda x: x**3
 
     def decode_request(self, request):
-        text = request["text"]
-        inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
-        return inputs
+        return request["input"]
 
-    def predict(self, inputs):
-        with torch.no_grad():
-            inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
-            outputs = self.model(**inputs)
-        return outputs.logits
+    def predict(self, x):
+        squared = self.model1(x)
+        cubed = self.model2(x)
+        output = squared + cubed
+        return {"output": output}
 
-    def encode_response(self, logits):
-        probabilities = torch.nn.functional.softmax(logits, dim=-1)
-        response = {
-            "positive": probabilities[:, 1].item(),
-            "negative": probabilities[:, 0].item()
-        }
-        return response
+    def encode_response(self, output):
+        return {"output": output}
 
 if __name__ == "__main__":
-    api = BERTLitAPI()
-    server = LitServer(api, accelerator='auto', workers_per_device=2)
+    api = SimpleLitAPI()
+    server = ls.LitServer(api, accelerator="cpu")
     server.run(port=8000)
+
+
+
   
