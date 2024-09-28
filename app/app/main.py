@@ -12,17 +12,14 @@ class SimpleLitAPI(ls.LitAPI):
         squared = self.model1(x)
         cubed = self.model2(x)
         output = squared + cubed
-        yield {"output": output}
+        return {"output": output}
 
     def encode_response(self, output):
-        yield {"output": output}
-    
-    def unbatch(self,response):
-        yield response
+        return {"output": output}
 
 if __name__ == "__main__":
     api = SimpleLitAPI()
-    server = ls.LitServer(api,accelerator="auto")
+    server = ls.LitServer(api, accelerator="cpu")
     server.run(port=8000)
 
 
