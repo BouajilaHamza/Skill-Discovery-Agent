@@ -1,6 +1,6 @@
 import sys
 import os
-
+from sklearn.cluster import KMeans, DBSCAN
 # Add the project root directory to sys.path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'))
 sys.path.append(project_root)
@@ -19,13 +19,23 @@ class UnsupervisedLearningStrategy(ABC):
 class KMeansStrategy(UnsupervisedLearningStrategy):
     def execute(self, data):
         # Placeholder for K-Means logic
-        return f"K-Means result for {data}"
+        # Example: KMeans clustering
+        kmeans = KMeans(n_clusters=3)
+        kmeans.fit(data)
+        labels = kmeans.labels_
+        # Return the labels as the result
+        return f"K-Means result for {labels.tolist()}"
 
 # Concrete Strategy: DBSCAN
 class DBSCANStrategy(UnsupervisedLearningStrategy):
     def execute(self, data):
         # Placeholder for DBSCAN logic
-        return f"DBSCAN result for {data}"
+        # Example: DBSCAN clustering
+        dbscan = DBSCAN(eps=0.5, min_samples=5)
+        dbscan.fit(data)
+        labels = dbscan.labels_
+        # Return the labels as the result
+        return f"DBSCAN result for {labels.tolist()}"
 
 # Modify the SimpleLitAPI class to use the ingestion pipeline factory
 class SimpleLitAPI(ls.LitAPI):
