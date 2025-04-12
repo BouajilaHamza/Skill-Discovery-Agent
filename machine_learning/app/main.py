@@ -1,12 +1,14 @@
 import sys
 import os
 from sklearn.cluster import KMeans, DBSCAN
+import litserve as ls
+from abc import ABC, abstractmethod
+import pandas as pd
+from sklearn.preprocessing import LabelEncoder
+
 # Add the project root directory to sys.path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'))
 sys.path.append(project_root)
-
-import litserve as ls
-from abc import ABC, abstractmethod
 from ingestion_pipeline import factory
 
 # Define the Strategy base class
@@ -54,8 +56,23 @@ class SimpleLitAPI(ls.LitAPI):
 
     def predict(self, x):
         data, strategy_key, pipeline_key, file_path = x
-
+        print(f"Data: {data}, Strategy: {strategy_key}, Pipeline: {pipeline_key}, File Path: {file_path}")
         # Select the strategy
+        try:
+            file_path = os.path.join(project_root, file_path)
+            data = pd.read_csv(file_path)         
+            label_encoder = LabelEncoder()
+            data['Company_Label'] = label_encoder.fit_transform(data['Ticker'])
+            data = data.drop(columns=['Ticker'])
+            if 'Date' in data.columns:
+                data['Date'] = pd.to_datetime(data['Date'])
+                data['Date'] = data['Date'].map(pd.Timestamp.toordinal)
+            data = data.dropna()
+        except Exception as e:
+            print(f"Error reading CSV file: {e}")
+            print(os.getcwd())
+            return {"error": "Failed to read CSV file"}
+        print(data)
         self.selected_strategy = self.strategies.get(strategy_key, self.strategies["kmeans"])
         result = self.selected_strategy.execute(data)
 
