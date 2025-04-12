@@ -1,0 +1,11 @@
+[project]
+name = "app"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "litserve>=0.2.7",
+    "requests>=2.32.3",
+    "scikit-learn>=1.6.1",
+]
