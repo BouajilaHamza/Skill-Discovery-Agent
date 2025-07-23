@@ -1,2 +1,6 @@
 # Prediction-Using-Unsupervised-ML
-This is the task two given by The Sparks Foundation as Data Science and Business Analytics Intern.  This task is about Prediction Using Unsupervised Machine Learning. Data can be found at : https://bit.ly/3kXTdox   LinkedIn Link : https://www.linkedin.com/in/ameni-chaabouni-3488181b4/ The Sparks Foundation Link : https://www.linkedin.com/company/the-sparks-foundation/mycompany/
+This is the task two given by The Sparks Foundation as Data Science and Business Analytics Intern.  
+This task is about Prediction Using Unsupervised Machine Learning. 
+- Data can be found at : https://bit.ly/3kXTdox   
+- LinkedIn Link : https://www.linkedin.com/in/ameni-chaabouni-3488181b4/ 
+- The Sparks Foundation Link : https://www.linkedin.com/company/the-sparks-foundation/mycompany/
