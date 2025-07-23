@@ -1,0 +1,16 @@
+[project]
+name = "ingestion-pipeline"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ipykernel>=6.29.5",
+    "requests>=2.32.3",
+    "litserve>=0.2.7",
+    "matplotlib>=3.10.1",
+    "pandas>=2.2.3",
+    "scikit-learn>=1.6.1",
+    "seaborn>=0.13.2",
+    "python-docx>=1.2.0",
+]
