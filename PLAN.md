@@ -1,54 +1,26 @@
-# File Organizer Project Plan
+# Skill Discovery Agent (DIAYN, MiniGrid, PyTorch Lightning)
 
-## Project Structure
-```
-.
-├── config/                    # Configuration files
-│   └── organizer_config.py    # File organization settings
-├── data_engineering/
-│   ├── file_processor.py     # File scanning and metadata extraction
-│   ├── content_extractor.py  # Extract text/content from files
-│   └── feature_engineer.py   # Generate features from file content
-├── machine_learning/
-│   ├── models/               # Clustering models
-│   │   ├── base_model.py     # Base model interface
-│   │   ├── text_cluster.py   # Text-based clustering
-│   │   └── image_cluster.py  # Image-based clustering
-│   ├── embeddings/           # Embedding models
-│   │   ├── text_embedder.py
-│   │   └── image_embedder.py
-│   └── utils/                # Helper functions
-├── user_interface/
-│   ├── cli.py               # Command-line interface
-│   └── visualizer.py        # Visualization of clusters
-└── tests/                   # Test files
-```
+## Notes
+- Project: Educational Skill Discovery Agent using DIAYN (optionally RE3) in MiniGrid.
+- Priorities: Simplicity, modularity, clarity, and extensibility.
+- All models must be lightweight (MLP/tiny CNN, low-res obs).
+- Use PyTorch Lightning and CPU-only training.
+- Log skill behavior/diversity; include clean code and comments.
+- Use Python 3.x, gymnasium (MiniGrid), PyTorch Lightning (unless user changes mind).
+- Avoid heavy dependencies; keep code minimal and educational.
+- Project structure uses `src/agents`, `src/envs`, `src/models`, `src/scripts`, etc. (see user tree above).
+- Place DIAYN agent in `src/agents/diayn_agent.py`, environment wrappers in `src/envs/`, models in `src/models/`, training script in `src/scripts/train.py`, configs in `configs/`.
+- Confirm assumptions with user if unclear.
 
-## Implementation Phases
+## Task List
+- [ ] Define environment wrapper for MiniGrid (low-res obs, skill-conditioning) in `src/envs/`.
+- [ ] Design model skeletons: encoder, policy, discriminator (MLP/tiny CNN) in `src/models/`.
+- [ ] Implement DIAYN agent and training loop in `src/agents/diayn_agent.py` and `src/scripts/train.py`.
+- [ ] Add logging for skill behavior/diversity (trajectories, skill labels).
+- [ ] Provide config file snippet (YAML) and CLI run example.
+- [ ] Suggest and implement a simple evaluation/visualization (e.g., print/plot trajectories).
+- [ ] Comment and explain all code sections.
+- [ ] Confirm user assumptions/preferences before finalizing modules.
 
-### Phase 1: Core Functionality
-1. File scanning and metadata extraction
-2. Basic text extraction from common document formats
-3. Simple clustering based on file metadata
-
-### Phase 2: Advanced Features
-1. Content-based clustering using embeddings
-2. Image feature extraction
-3. Combined metadata and content clustering
-
-### Phase 3: User Interface
-1. Command-line interface
-2. Visualization of file clusters
-3. Preview and apply organization
-
-## Dependencies
-- Python 3.8+
-- Required packages:
-  - pandas, numpy
-  - scikit-learn
-  - python-magic (file type detection)
-  - PyPDF2, python-docx (document processing)
-  - Pillow (image processing)
-  - sentence-transformers (text embeddings)
-  - click (CLI)
-  - rich (terminal formatting)
+## Current Goal
+Draft/adapt code skeletons and plan for project structure.
