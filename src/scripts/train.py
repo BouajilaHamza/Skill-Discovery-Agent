@@ -81,7 +81,7 @@ def train():
 
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+    print(device)
     # Initialize agent with config and move to device
     agent = DIAYNAgent(config).to(device)
     
