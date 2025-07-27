@@ -4,8 +4,10 @@ import torch.nn.functional as F
 import torch.cuda.amp as amp
 import numpy as np
 from collections import deque, namedtuple
-import random
-from typing import Optional, Tuple, Dict, List, Any
+from typing import Tuple, Dict, Any
+
+from src.agents.base_agent import BaseAgent
+from src.models.base_model import BaseModel
 
 # Define transition tuple
 Transition = namedtuple('Transition', 
