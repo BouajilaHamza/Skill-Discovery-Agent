@@ -1,4 +1,3 @@
-# src/scripts/train.py
 import os
 import yaml
 import argparse
@@ -7,9 +6,6 @@ import numpy as np
 import torch
 from datetime import datetime
 from tqdm import tqdm
-from collections import deque
-
-from pytorch_lightning import Trainer, LightningModule
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 
@@ -111,21 +107,10 @@ def train():
         mode="max",
     )
     
-    # Initialize trainer
-    trainer = Trainer(
-        max_epochs=config["training"]["max_episodes"],
-        logger=logger,
-        callbacks=[checkpoint_callback],
-        log_every_n_steps=1,
-        enable_checkpointing=True,
-        accelerator="cpu",
-        devices=1,
-        check_val_every_n_epoch=config["training"].get("eval_interval", 10),
-    )
-    
     # Training loop
     max_episodes = config["training"]["max_episodes"]
     eval_interval = config["training"].get("eval_interval", 10)
+    save_interval = config["training"].get("save_interval", 100)
     
     # Metrics tracking
     episode_rewards = []
@@ -134,7 +119,13 @@ def train():
     # Progress bar
     pbar = tqdm(range(max_episodes), desc="Training")
     
+    # Initialize optimizers
+    optimizer_d, optimizer_p = agent.configure_optimizers()
+    
     for episode in pbar:
+        # Set model to train mode
+        agent.train()
+        
         # Collect rollout
         episode_reward, episode_length = collect_rollout(env, agent)
         
@@ -146,11 +137,12 @@ def train():
         avg_reward = np.mean(episode_rewards[-100:])  # Last 100 episodes
         avg_length = np.mean(episode_lengths[-100:])
         
-        # Log to TensorBoard
-        trainer.logger.experiment.add_scalar("train/episode_reward", episode_reward, episode)
-        trainer.logger.experiment.add_scalar("train/episode_length", episode_length, episode)
-        trainer.logger.experiment.add_scalar("train/avg_reward", avg_reward, episode)
-        trainer.logger.experiment.add_scalar("train/avg_length", avg_length, episode)
+        # Log to TensorBoard if logger is available
+        if logger:
+            logger.experiment.add_scalar("train/episode_reward", episode_reward, episode)
+            logger.experiment.add_scalar("train/episode_length", episode_length, episode)
+            logger.experiment.add_scalar("train/avg_reward", avg_reward, episode)
+            logger.experiment.add_scalar("train/avg_length", avg_length, episode)
         
         # Update progress bar
         pbar.set_postfix({
@@ -159,19 +151,59 @@ def train():
             "length": episode_length
         })
         
+        # Perform training step
+        if len(agent.replay_buffer) >= agent.batch_size:
+            # Train discriminator
+            optimizer_d.zero_grad()
+            loss_d = agent.training_step(None, episode, optimizer_idx=0)
+            loss_d.backward()
+            optimizer_d.step()
+            
+            # Train policy
+            optimizer_p.zero_grad()
+            loss_p = agent.training_step(None, episode, optimizer_idx=1)
+            loss_p.backward()
+            optimizer_p.step()
+            
+            if logger:
+                logger.experiment.add_scalar("train/loss_discriminator", loss_d.item(), episode)
+                logger.experiment.add_scalar("train/loss_policy", loss_p.item(), episode)
+        
         # Perform evaluation
         if (episode + 1) % eval_interval == 0:
+            agent.eval()
             eval_rewards = []
-            for _ in range(5):  # Run 5 evaluation episodes
-                eval_reward, _ = collect_rollout(env, agent)
-                eval_rewards.append(eval_reward)
+            with torch.no_grad():
+                for _ in range(5):  # Run 5 evaluation episodes
+                    eval_reward, _ = collect_rollout(env, agent)
+                    eval_rewards.append(eval_reward)
             
             avg_eval_reward = np.mean(eval_rewards)
-            trainer.logger.experiment.add_scalar("eval/avg_reward", avg_eval_reward, episode)
+            if logger:
+                logger.experiment.add_scalar("eval/avg_reward", avg_eval_reward, episode)
+            
+            agent.train()
+        
+        # Save checkpoint
+        if (episode + 1) % save_interval == 0 or episode == max_episodes - 1:
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            checkpoint_path = os.path.join(checkpoint_dir, f"diayn_episode_{episode+1}.ckpt")
+            torch.save({
+                'episode': episode,
+                'model_state_dict': agent.state_dict(),
+                'optimizer_d_state_dict': optimizer_d.state_dict(),
+                'optimizer_p_state_dict': optimizer_p.state_dict(),
+                'episode_rewards': episode_rewards,
+                'episode_lengths': episode_lengths,
+                'config': config
+            }, checkpoint_path)
     
     # Save final model
-    final_model_path = os.path.join(checkpoint_dir, "diayn_final.ckpt")
-    trainer.save_checkpoint(final_model_path)
+    final_model_path = os.path.join(checkpoint_dir, "diayn_final.pt")
+    torch.save({
+        'model_state_dict': agent.state_dict(),
+        'config': config
+    }, final_model_path)
     print(f"\nTraining complete! Final model saved to {final_model_path}")
     
     # Save training metrics
@@ -184,6 +216,8 @@ def train():
     metrics_path = os.path.join(log_dir, 'training_metrics.pt')
     torch.save(metrics, metrics_path)
     print(f"Training metrics saved to {metrics_path}")
+    
+    return agent
 
 if __name__ == "__main__":
     train()

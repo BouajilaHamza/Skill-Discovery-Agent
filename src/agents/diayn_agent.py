@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 import numpy as np
-from typing import Dict,Any,Tuple
+from typing import Dict,Any,Tuple,List
 from collections import deque,namedtuple
 
 
@@ -43,14 +43,14 @@ class MiniGridEncoder(BaseModel):
             nn.Flatten()
         )
         
-        # Calculate the output size of the conv layers
+
         with torch.no_grad():
             # Create a dummy input with correct shape (N, C, H, W)
             dummy = torch.zeros(1, self.in_channels, *obs_shape[:2])
             conv_out = self.conv(dummy)
             self.conv_output_dim = conv_out.shape[1]
             
-        # Final fully connected layer to project to desired feature dimension
+
         self.fc = nn.Linear(self.conv_output_dim, feature_dim)
         self.feature_dim = feature_dim
     
@@ -82,9 +82,8 @@ class MiniGridEncoder(BaseModel):
             else:
                 raise ValueError(f"Expected 1 or 3 channels for RGB, got {obs.shape[1]} channels")
                 
-        # Pass through conv layers
+
         x = self.conv(obs)
-        # Flatten and project to hidden_dim
         return torch.relu(self.fc(x))
     
 
@@ -135,12 +134,12 @@ class DIAYNAgent(BaseAgent):
         self.skill_dim = config.get("skill_dim",8)
         self.obs_type = config.get("obs_type","rgb")
         
-        #Training parameters
-        self.lr = config.get("lr",3e-4)
-        self.gamma = config.get("gamma",0.99)
-        self.entropy_coeff = config.get("entropy_coeff",0.01)
-        self.batch_size = config.get("batch_size",64)
-        self.replay_size = config.get("replay_size",10000)
+        # Training parameters
+        self.lr = float(config.get("lr", 3e-4))
+        self.gamma = float(config.get("gamma", 0.99))
+        self.entropy_coeff = float(config.get("entropy_coeff", 0.01))
+        self.batch_size = int(config.get("batch_size", 64))
+        self.replay_size = int(config.get("replay_size", 10000))
         
         
         #Models
@@ -182,7 +181,7 @@ class DIAYNAgent(BaseAgent):
             torch.Tensor: The action.
         """
         with torch.no_grad():
-            encoded_obs = self.encoder(obs) #return the state
+            encoded_obs = self.encoder(obs) #return the state in latent space
             x = torch.cat([encoded_obs,skill],dim=-1)
             logits = self.policy(x)
             if deterministic:
@@ -234,14 +233,14 @@ class DIAYNAgent(BaseAgent):
             
             return policy_loss
             
-    def configure_optimizers(self):
+    def configure_optimizers(self) -> List[torch.optim.Optimizer]:
         """Configure optimizers."""
         opt_d = torch.optim.Adam(self.discriminator.parameters(), lr=self.lr)
         opt_p = torch.optim.Adam(
             list(self.encoder.parameters()) + list(self.policy.parameters()),
             lr=self.lr
         )
-        return [opt_d, opt_p], []
+        return [opt_d, opt_p]
     
     def _sample_batch(self):
         """Sample a batch from replay buffer."""
@@ -250,7 +249,9 @@ class DIAYNAgent(BaseAgent):
         else:
             batch_size = self.batch_size
             
-        transitions = np.random.sample(self.replay_buffer, batch_size)
+        # Sample random indices
+        indices = np.random.choice(len(self.replay_buffer), size=batch_size, replace=False)
+        transitions = [self.replay_buffer[i] for i in indices]
         batch = Transition(*zip(*transitions))
         
         return (
