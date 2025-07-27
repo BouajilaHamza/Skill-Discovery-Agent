@@ -30,7 +30,7 @@ def collect_rollout(env, agent, max_steps=1000):
     episode_length = 0
     
     for _ in range(max_steps):
-        # Convert observation to tensor and add batch dimension
+        print("agent.device in rollout:",agent.device)
         obs_tensor = torch.FloatTensor(obs["observation"]).unsqueeze(0).to(agent.device)
         skill_tensor = torch.FloatTensor(skill).unsqueeze(0).to(agent.device)
         

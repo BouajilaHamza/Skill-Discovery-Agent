@@ -146,7 +146,7 @@ class DIAYNAgent(BaseAgent):
         self.encoder = MiniGridEncoder(self.obs_shape,
                                        feature_dim = config.get("hidden_dim",64),
                                        obs_type = self.obs_type
-                                       )
+                                       ).to(self.device)
         
         #Policy Network 
         self.policy = nn.Sequential(
@@ -155,14 +155,14 @@ class DIAYNAgent(BaseAgent):
             nn.Linear(64,64),
             nn.ReLU(),
             nn.Linear(64,self.action_dim)
-        )
+        ).to(self.device)
         
         #Discriminator Network
         self.discriminator = SkillDiscriminator(
             self.encoder.feature_dim,
             self.skill_dim,
             hidden_dim = config.get("hidden_dim",64)
-        )
+        ).to(self.device)
         
         #Replay Buffer
         self.replay_buffer = deque(maxlen=self.replay_size)
@@ -182,13 +182,13 @@ class DIAYNAgent(BaseAgent):
         """
         with torch.no_grad():
             encoded_obs = self.encoder(obs) #return the state in latent space
-            x = torch.cat([encoded_obs,skill],dim=-1)
-            logits = self.policy(x)
+            x = torch.cat([encoded_obs,skill],dim=-1).to(self.device)
+            logits = self.policy(x).to(self.device)
             if deterministic:
-                return torch.argmax(logits,dim=-1)
+                return torch.argmax(logits,dim=-1).to(self.device)
             else:
-                probs = F.softmax(logits,dim=-1)
-                return torch.multinomial(probs,1).squeeze(-1)
+                probs = F.softmax(logits,dim=-1).to(self.device)
+                return torch.multinomial(probs,1).squeeze(-1).to(self.device)
             
     
     def act(self,obs:torch.Tensor,skill:torch.Tensor=None,deterministic:bool=False) -> torch.Tensor:
@@ -208,20 +208,20 @@ class DIAYNAgent(BaseAgent):
         
         #Train Discriminator
         if optimizer_idx == 0:
-            logits = self.discriminator(next_states_enc)
-            loss_d = F.cross_entropy(logits,skills.argmax(dim=-1))
+            logits = self.discriminator(next_states_enc).to(self.device)
+            loss_d = F.cross_entropy(logits,skills.argmax(dim=-1)).to(self.device)
             self.log("train/loss_discriminator",loss_d)
             return loss_d
             
         
         #Compute Policy
         if optimizer_idx == 1:
-            policy_input = torch.cat([states_enc,skills],dim=-1)
-            logits = self.policy(policy_input)
+            policy_input = torch.cat([states_enc,skills],dim=-1).to(self.device)
+            logits = self.policy(policy_input).to(self.device)
             
-            probs = F.softmax(logits,dim=-1)
-            log_probs = F.log_softmax(logits,dim=-1)
-            entropy = - (probs * log_probs).sum(dim=-1)
+            probs = F.softmax(logits,dim=-1).to(self.device)
+            log_probs = F.log_softmax(logits,dim=-1).to(self.device)
+            entropy = - (probs * log_probs).sum(dim=-1).to(self.device)
             
             with torch.no_grad():
                 intrinsic_reward = self.discriminator.compute_reward(next_states_enc,skills)
@@ -255,12 +255,12 @@ class DIAYNAgent(BaseAgent):
         batch = Transition(*zip(*transitions))
         
         return (
-            torch.stack(batch.state),
-            torch.cat(batch.action),
-            torch.stack(batch.skill),
-            torch.stack(batch.next_state),
-            torch.stack(batch.done),
-            torch.stack(batch.reward)
+            torch.stack(batch.state).to(self.device),
+            torch.cat(batch.action).to(self.device),
+            torch.stack(batch.skill).to(self.device),
+            torch.stack(batch.next_state).to(self.device),
+            torch.stack(batch.done).to(self.device),
+            torch.stack(batch.reward).to(self.device)
         )
     
     
