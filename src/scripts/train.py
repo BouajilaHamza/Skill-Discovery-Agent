@@ -32,58 +32,51 @@ def collect_rollout(env, agent, max_steps=1000):
     episode_reward = 0
     episode_length = 0
     
-    # Pre-allocate tensors on GPU if available
-    if torch.cuda.is_available():
-        obs_buffer = torch.empty((1, *obs["observation"].shape), 
-                               dtype=torch.float32, 
-                               device=agent.device,
-                               pin_memory=True)
-        skill_buffer = torch.empty((1, len(skill)), 
-                                 dtype=torch.float32, 
-                                 device=agent.device,
-                                 pin_memory=True)
+    # Convert initial observation to tensor
+    obs_array = np.asarray(obs["observation"], dtype=np.float32)
     
     for _ in range(max_steps):
-        # Efficient data transfer using pinned memory
-        if torch.cuda.is_available():
-            obs_buffer.copy_(torch.as_tensor(obs["observation"][None, ...], 
-                                          device='cpu'), 
-                          non_blocking=True)
-            skill_buffer.copy_(torch.as_tensor(skill[None, ...], 
-                                            device='cpu'), 
-                            non_blocking=True)
-            obs_tensor = obs_buffer
-            skill_tensor = skill_buffer
-        else:
-            obs_tensor = torch.FloatTensor(obs["observation"]).unsqueeze(0).to(agent.device)
-            skill_tensor = torch.FloatTensor(skill).unsqueeze(0).to(agent.device)
+        # Convert to tensor and move to device
+        obs_tensor = torch.from_numpy(obs_array).unsqueeze(0).to(agent.device)
+        skill_tensor = torch.FloatTensor(skill).unsqueeze(0).to(agent.device)
         
-
-        with torch.no_grad():
-            action = agent.forward(obs_tensor, skill_tensor, deterministic=False)
-            action = action.item()
+        # Ensure tensors are contiguous
+        obs_tensor = obs_tensor.contiguous()
+        skill_tensor = skill_tensor.contiguous()
         
-        next_obs, reward, terminated, truncated, _ = env.step(action)
-        done = terminated or truncated
+        # Get action from agent
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled=agent.device.type == 'cuda'):
+            action = agent.act(obs_tensor, skill_tensor, deterministic=False)
         
-        # Store transition in replay buffer
+        # Step environment
+        next_obs, reward, done, _, _ = env.step(action.item() if torch.is_tensor(action) else action)
+        
+        # Convert next observation to numpy
+        next_obs_array = np.asarray(next_obs["observation"], dtype=np.float32)
+        
+        # Store transition
         agent.add_to_replay(
-            obs["observation"],
-            action,
+            obs_array,  # Use numpy array
+            action.item() if torch.is_tensor(action) else action,
             skill,
-            next_obs["observation"],
+            next_obs_array,  # Use numpy array
             done,
             reward
         )
         
+        # Update state
+        obs_array = next_obs_array
+        obs = next_obs
         episode_reward += reward
         episode_length += 1
         
-        obs = next_obs
-        
         if done:
             break
-    
+            
+        # Clear CUDA cache periodically
+        if episode_length % 100 == 0 and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
     return episode_reward, episode_length
 
 def train():
@@ -92,6 +85,9 @@ def train():
     
     # Set up device and mixed precision
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    # Set up mixed precision
     scaler = amp.GradScaler(enabled=(device.type == 'cuda'))
     
     # Create environment
@@ -106,15 +102,22 @@ def train():
     config["agent"]["obs_shape"] = env.observation_space["observation"].shape
     config["agent"]["action_dim"] = env.action_space.n
     
-    # Initialize agent with config and move to device
+    # Initialize agent with config
     agent = DIAYNAgent(config).to(device)
+    
     agent.train()
     
-    # Enable cuDNN benchmarking for optimal performance
-    if torch.cuda.is_available():
+    # Enable optimizations if using CUDA
+    if device.type == 'cuda':
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        
+        # Print GPU info
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA available: {torch.cuda.is_available()}")
+        print(f"CUDA version: {torch.version.cuda}")
+        print(f"PyTorch version: {torch.__version__}")
 
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -139,53 +142,133 @@ def train():
         mode="max",
     )
     
+    # Get training config
     max_episodes = config["training"]["max_episodes"]
-    eval_interval = config["training"].get("eval_interval", 10)
+    max_steps = config["training"]["max_steps_per_episode"]
+    log_interval = config["training"].get("log_interval", 10)
     save_interval = config["training"].get("save_interval", 100)
-
+    
+    # Create progress bar
+    pbar = tqdm(range(1, max_episodes + 1), desc="Training", unit="episode")
+    
+    # Initialize optimizers
+    optimizers = agent.configure_optimizers()
+    if isinstance(optimizers, (list, tuple)) and len(optimizers) > 0:
+        if isinstance(optimizers[0], (list, tuple)):
+            # Handle case where optimizers is a list of optimizers and schedulers
+            optimizers = optimizers[0]
+    
+    # Unpack optimizers if we have multiple
+    if isinstance(optimizers, (list, tuple)) and len(optimizers) >= 2:
+        optimizer_d, optimizer_p = optimizers[0], optimizers[1]
+    else:
+        # Fallback to single optimizer if needed
+        optimizer_d = optimizers[0] if isinstance(optimizers, (list, tuple)) else optimizers
+        optimizer_p = optimizer_d
+    
     episode_rewards = []
     episode_lengths = []
-    
-    pbar = tqdm(range(max_episodes), desc="Training")
-    
-    optimizer_d, optimizer_p = agent.configure_optimizers()
+    total_steps = 0
+    best_reward = -float('inf')
     
     for episode in pbar:
-        agent.train()        
-        episode_reward, episode_length = collect_rollout(env, agent)
-        
-        episode_rewards.append(episode_reward)
-        episode_lengths.append(episode_length)
-        
-        avg_reward = np.mean(episode_rewards[-100:])
-        avg_length = np.mean(episode_lengths[-100:])
-        
-        # Log to TensorBoard if logger is available
-        if logger:
-            logger.experiment.add_scalar("train/episode_reward", episode_reward, episode)
-            logger.experiment.add_scalar("train/episode_length", episode_length, episode)
-            logger.experiment.add_scalar("train/avg_reward", avg_reward, episode)
-            logger.experiment.add_scalar("train/avg_length", avg_length, episode)
-        
-        pbar.set_postfix({
-            "reward": f"{episode_reward:.1f}",
-            "avg_reward": f"{avg_reward:.1f}",
-            "length": episode_length
-        })
+        try:
+            # Set models to train mode
+            agent.train()
+            
+            # Collect rollout
+            episode_reward, episode_length = collect_rollout(env, agent, max_steps)
+            
+            # Store metrics
+            episode_rewards.append(episode_reward)
+            episode_lengths.append(episode_length)
+            total_steps += episode_length
+            
+            # Calculate running averages
+            avg_reward = np.mean(episode_rewards[-100:]) if episode_rewards else 0
+            avg_length = np.mean(episode_lengths[-100:]) if episode_lengths else 0
+            
+            # Update progress bar
+            pbar.set_postfix({
+                'reward': f'{episode_reward:.2f}',
+                'avg_reward': f'{avg_reward:.2f}',
+                'length': episode_length,
+                'steps': total_steps
+            })
+            
+            # Log metrics
+            if logger is not None:
+                logger.experiment.add_scalar("train/episode_reward", episode_reward, episode)
+                logger.experiment.add_scalar("train/episode_length", episode_length, episode)
+                logger.experiment.add_scalar("train/avg_reward", avg_reward, episode)
+                logger.experiment.add_scalar("train/avg_length", avg_length, episode)
+                logger.experiment.add_scalar("train/total_steps", total_steps, episode)
+            
+            # Save best model
+            if episode_reward > best_reward:
+                best_reward = episode_reward
+                if logger is not None and hasattr(logger, 'save_checkpoint'):
+                    checkpoint = {
+                        'episode': episode,
+                        'model_state_dict': agent.state_dict(),
+                        'reward': episode_reward,
+                        'optimizer_state_dict': [opt.state_dict() for opt in optimizers] if isinstance(optimizers, list) else optimizers.state_dict(),
+                    }
+                    logger.save_checkpoint(checkpoint, is_best=True)
+            
+            # Save model at intervals
+            if episode % save_interval == 0 and logger is not None and hasattr(logger, 'save_checkpoint'):
+                checkpoint = {
+                    'episode': episode,
+                    'model_state_dict': agent.state_dict(),
+                    'reward': episode_reward,
+                    'optimizer_state_dict': [opt.state_dict() for opt in optimizers] if isinstance(optimizers, list) else optimizers.state_dict(),
+                }
+                logger.save_checkpoint(checkpoint, is_best=False, filename=f'checkpoint_ep{episode}.pt')
+            
+            # Clear CUDA cache periodically
+            if episode % 10 == 0 and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
+        except Exception as e:
+            print(f"Error during episode {episode}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            continue
         
         # Perform training step
         if len(agent.replay_buffer) >= agent.batch_size:
-            # Train discriminator
-            optimizer_d.zero_grad()
-            loss_d = agent.training_step(None, episode, optimizer_idx=0)
-            loss_d.backward()
-            optimizer_d.step()
-            
-            # Train policy
-            optimizer_p.zero_grad()
-            loss_p = agent.training_step(None, episode, optimizer_idx=1)
-            loss_p.backward()
-            optimizer_p.step()
+            try:
+                # Train discriminator
+                optimizer_d.zero_grad()
+                with torch.cuda.amp.autocast(enabled=agent.device.type == 'cuda'):
+                    loss_d = agent.training_step(None, episode, optimizer_idx=0)
+                scaler.scale(loss_d).backward()
+                scaler.step(optimizer_d)
+                scaler.update()
+                
+                # Train policy
+                optimizer_p.zero_grad()
+                with torch.cuda.amp.autocast(enabled=agent.device.type == 'cuda'):
+                    loss_p = agent.training_step(None, episode, optimizer_idx=1)
+                scaler.scale(loss_p).backward()
+                scaler.step(optimizer_p)
+                
+                # Update scaler for next iteration
+                scaler.update()
+                
+                # Log training metrics
+                if logger is not None:
+                    logger.experiment.add_scalar("train/loss_discriminator", loss_d.item(), episode)
+                    logger.experiment.add_scalar("train/loss_policy", loss_p.item(), episode)
+                    
+            except RuntimeError as e:
+                print(f"Error during training step: {str(e)}")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()  # Wait for all kernels to finish
             
             if logger:
                 logger.experiment.add_scalar("train/loss_discriminator", loss_d.item(), episode)
