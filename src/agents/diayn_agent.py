@@ -129,8 +129,8 @@ class DIAYNAgent(BaseAgent):
         super().__init__(config)
         
         #Environment parameters
-        self.obs_shape = config["obs_shape"]
-        self.action_dim = config["action_dim"]
+        self.obs_shape = config["agent"]["obs_shape"]
+        self.action_dim = config["agent"]["action_dim"]
         self.skill_dim = config.get("skill_dim",8)
         self.obs_type = config.get("obs_type","rgb")
         

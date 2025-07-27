@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Visualization script for DIAYN skill discovery in MiniGrid environments.
 
@@ -11,8 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 import gymnasium as gym
-from tqdm import tqdm
-
+import pickle
 from src.agents.diayn_agent import DIAYNAgent
 from src.envs.minigrid_wrapper import MiniGridWrapper
 
@@ -37,18 +35,39 @@ def parse_args():
 
 def load_agent(checkpoint_path, env):
     """Load a trained DIAYN agent from checkpoint."""
-    # Load the checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+    from torch.serialization import add_safe_globals
     
-    # Create agent with dummy config (will be overridden)
-    config = {
+    # Add numpy's scalar type to safe globals for loading
+    add_safe_globals([np._core.multiarray.scalar])
+    
+    try:
+        # First try with weights_only=True (safer)
+        checkpoint = torch.load(checkpoint_path, 
+                             map_location=torch.device('cpu'),
+                             weights_only=True)
+    except (pickle.UnpicklingError, RuntimeError):
+        # Fall back to weights_only=False if needed (less secure)
+        checkpoint = torch.load(checkpoint_path,
+                             map_location=torch.device('cpu'),
+                             weights_only=False)
+    
+
+    config = checkpoint.get('config', {
         "obs_shape": env.observation_space["observation"].shape,
         "action_dim": env.action_space.n,
-        "skill_dim": 8,  # Will be overridden from checkpoint
-    }
+        "skill_dim": 8,
+    })
     
+    print(config)
     agent = DIAYNAgent(config)
-    agent.load_state_dict(checkpoint['state_dict'])
+    
+    if 'model_state_dict' in checkpoint:
+        agent.load_state_dict(checkpoint['model_state_dict'])
+    elif 'state_dict' in checkpoint:
+        agent.load_state_dict(checkpoint['state_dict'])
+    else:
+        raise ValueError("Checkpoint must contain either 'model_state_dict' or 'state_dict'")
+    
     agent.eval()
     return agent
 
@@ -56,10 +75,10 @@ def visualize_skills(agent, env, args):
     """Visualize learned skills by rolling out episodes with different skills."""
     os.makedirs(args.save_dir, exist_ok=True)
     
-    # Create one-hot skill vectors
+
     skills = torch.eye(agent.skill_dim, device=agent.device)
     
-    # For each skill, run episodes and collect trajectories
+
     skill_data = {}
     
     for skill_idx in range(min(args.num_skills, agent.skill_dim)):

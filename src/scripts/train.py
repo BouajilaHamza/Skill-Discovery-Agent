@@ -34,12 +34,11 @@ def collect_rollout(env, agent, max_steps=1000):
         obs_tensor = torch.FloatTensor(obs["observation"]).unsqueeze(0).to(agent.device)
         skill_tensor = torch.FloatTensor(skill).unsqueeze(0).to(agent.device)
         
-        # Select action
+
         with torch.no_grad():
             action = agent.forward(obs_tensor, skill_tensor, deterministic=False)
             action = action.item()
         
-        # Take step in environment
         next_obs, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated
         
@@ -53,11 +52,9 @@ def collect_rollout(env, agent, max_steps=1000):
             reward
         )
         
-        # Update metrics
         episode_reward += reward
         episode_length += 1
         
-        # Update observation
         obs = next_obs
         
         if done:
@@ -69,7 +66,7 @@ def train():
     args = parse_args()
     config = load_config(args.config)
     
-    # Create environment
+
     env = gym.make(config["env_id"], render_mode="rgb_array")
     env = MiniGridWrapper(
         env, 
@@ -81,10 +78,10 @@ def train():
     config["agent"]["obs_shape"] = env.observation_space["observation"].shape
     config["agent"]["action_dim"] = env.action_space.n
     
-    # Create agent
-    agent = DIAYNAgent(config["agent"])
+
+    agent = DIAYNAgent(config)
     
-    # Set up logging
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = os.path.join(args.log_dir, f"diayn_{timestamp}")
     os.makedirs(log_dir, exist_ok=True)
@@ -95,7 +92,7 @@ def train():
         version=timestamp
     )
     
-    # Set up model checkpointing
+
     checkpoint_dir = os.path.join(log_dir, "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
     
@@ -107,34 +104,25 @@ def train():
         mode="max",
     )
     
-    # Training loop
     max_episodes = config["training"]["max_episodes"]
     eval_interval = config["training"].get("eval_interval", 10)
     save_interval = config["training"].get("save_interval", 100)
-    
-    # Metrics tracking
+
     episode_rewards = []
     episode_lengths = []
     
-    # Progress bar
     pbar = tqdm(range(max_episodes), desc="Training")
     
-    # Initialize optimizers
     optimizer_d, optimizer_p = agent.configure_optimizers()
     
     for episode in pbar:
-        # Set model to train mode
-        agent.train()
-        
-        # Collect rollout
+        agent.train()        
         episode_reward, episode_length = collect_rollout(env, agent)
         
-        # Update metrics
         episode_rewards.append(episode_reward)
         episode_lengths.append(episode_length)
         
-        # Log metrics
-        avg_reward = np.mean(episode_rewards[-100:])  # Last 100 episodes
+        avg_reward = np.mean(episode_rewards[-100:])
         avg_length = np.mean(episode_lengths[-100:])
         
         # Log to TensorBoard if logger is available
@@ -144,7 +132,6 @@ def train():
             logger.experiment.add_scalar("train/avg_reward", avg_reward, episode)
             logger.experiment.add_scalar("train/avg_length", avg_length, episode)
         
-        # Update progress bar
         pbar.set_postfix({
             "reward": f"{episode_reward:.1f}",
             "avg_reward": f"{avg_reward:.1f}",
@@ -174,7 +161,7 @@ def train():
             agent.eval()
             eval_rewards = []
             with torch.no_grad():
-                for _ in range(5):  # Run 5 evaluation episodes
+                for _ in range(5):
                     eval_reward, _ = collect_rollout(env, agent)
                     eval_rewards.append(eval_reward)
             
@@ -184,7 +171,7 @@ def train():
             
             agent.train()
         
-        # Save checkpoint
+
         if (episode + 1) % save_interval == 0 or episode == max_episodes - 1:
             os.makedirs(checkpoint_dir, exist_ok=True)
             checkpoint_path = os.path.join(checkpoint_dir, f"diayn_episode_{episode+1}.ckpt")
@@ -198,7 +185,7 @@ def train():
                 'config': config
             }, checkpoint_path)
     
-    # Save final model
+
     final_model_path = os.path.join(checkpoint_dir, "diayn_final.pt")
     torch.save({
         'model_state_dict': agent.state_dict(),
@@ -206,7 +193,7 @@ def train():
     }, final_model_path)
     print(f"\nTraining complete! Final model saved to {final_model_path}")
     
-    # Save training metrics
+
     metrics = {
         'episode_rewards': episode_rewards,
         'episode_lengths': episode_lengths,
