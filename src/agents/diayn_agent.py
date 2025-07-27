@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.cuda.amp as amp
+import torch.amp
 import numpy as np
 from collections import deque, namedtuple
 from typing import Tuple, Dict, Any
@@ -202,16 +202,23 @@ class DIAYNAgent(BaseAgent):
         Perform a single training step with mixed precision support.
         
         Args:
-            batch: Batch of transitions
+            batch: Batch of transitions (if None, sample from replay buffer)
             batch_idx: Batch index
             optimizer_idx: Index of the optimizer (0: discriminator, 1: policy)
             
         Returns:
-            dict: Dictionary containing loss and other metrics
+            torch.Tensor: The computed loss
         """
+        # If batch is None, sample from replay buffer
+        if batch is None:
+            if len(self.replay_buffer) < self.batch_size:
+                return torch.tensor(0.0, device=self.device)
+            batch = self._sample_batch()
+            
         states, actions, skills, next_states, dones, rewards = self._unpack_batch(batch)
         
-        with amp.autocast(enabled=self.device.type == 'cuda'):
+        with torch.amp.autocast(device_type='cuda' if self.device.type == 'cuda' else 'cpu', 
+                              enabled=self.device.type == 'cuda'):
             # Encode states and next_states
             with torch.no_grad():
                 states_enc = self.encoder(states)
@@ -271,6 +278,50 @@ class DIAYNAgent(BaseAgent):
         scheduler_p = torch.optim.lr_scheduler.CosineAnnealingLR(opt_p, T_max=1000)
         
         return [opt_d, opt_p], [scheduler_d, scheduler_p]   
+        
+    def _unpack_batch(self, batch):
+        """Unpack a batch of transitions from the replay buffer.
+        
+        Args:
+            batch: Batch of transitions. Can be:
+                - List of transitions (state, action, skill, next_state, done, reward)
+                - Tuple of (states, actions, skills, next_states, dones, rewards)
+                
+        Returns:
+            tuple: (states, actions, skills, next_states, dones, rewards) as torch tensors
+        """
+        # Handle case where batch is already a tuple of tensors
+        if isinstance(batch, (list, tuple)) and len(batch) == 6 and all(torch.is_tensor(x) for x in batch):
+            return batch
+            
+        # Handle case where batch is a list of transitions
+        if isinstance(batch, list) and len(batch) > 0 and isinstance(batch[0], (list, tuple)):
+            # Transpose the batch: from list of transitions to list of fields
+            states, actions, skills, next_states, dones, rewards = zip(*batch)
+        else:
+            # Assume batch is already in the correct format
+            states, actions, skills, next_states, dones, rewards = batch
+        
+        # Convert to numpy arrays if they aren't already
+        states = np.array(states) if not isinstance(states, np.ndarray) else states
+        next_states = np.array(next_states) if not isinstance(next_states, np.ndarray) else next_states
+        skills = np.array(skills) if not isinstance(skills, np.ndarray) else skills
+        
+        # Convert to tensors and move to device
+        states = torch.as_tensor(states, dtype=torch.float32, device=self.device)
+        actions = torch.as_tensor(actions, dtype=torch.long, device=self.device)
+        skills = torch.as_tensor(skills, dtype=torch.float32, device=self.device)
+        next_states = torch.as_tensor(next_states, dtype=torch.float32, device=self.device)
+        dones = torch.as_tensor(dones, dtype=torch.float32, device=self.device)
+        rewards = torch.as_tensor(rewards, dtype=torch.float32, device=self.device)
+        
+        # Ensure correct shapes
+        if len(states.shape) == 3:  # (B, H, W) -> (B, 1, H, W)
+            states = states.unsqueeze(1)
+        if len(next_states.shape) == 3:
+            next_states = next_states.unsqueeze(1)
+            
+        return states, actions, skills, next_states, dones, rewards
         
     def _sample_batch(self):
         """Sample a batch from replay buffer."""

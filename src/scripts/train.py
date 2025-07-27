@@ -5,7 +5,8 @@ import gymnasium as gym
 import numpy as np
 import torch
 import torch.optim as optim
-import torch.cuda.amp as amp
+import torch.amp
+from pathlib import Path
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -45,7 +46,7 @@ def collect_rollout(env, agent, max_steps=1000):
         skill_tensor = skill_tensor.contiguous()
         
         # Get action from agent
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=agent.device.type == 'cuda'):
+        with torch.no_grad(), torch.amp.autocast(device_type='cuda' if agent.device.type == 'cuda' else 'cpu', enabled=agent.device.type == 'cuda'):
             action = agent.act(obs_tensor, skill_tensor, deterministic=False)
         
         # Step environment
@@ -87,8 +88,8 @@ def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Set up mixed precision
-    scaler = amp.GradScaler(enabled=(device.type == 'cuda'))
+    # Initialize mixed precision training
+    scaler = torch.amp.GradScaler(enabled=device.type == 'cuda')
     
     # Create environment
     env = gym.make(config["env_id"], render_mode="rgb_array")
@@ -142,14 +143,16 @@ def train():
         mode="max",
     )
     
-    # Get training config
-    max_episodes = config["training"]["max_episodes"]
-    max_steps = config["training"]["max_steps_per_episode"]
-    log_interval = config["training"].get("log_interval", 10)
-    save_interval = config["training"].get("save_interval", 100)
+    # Training parameters from config
+    num_episodes = config.get("training", {}).get("num_episodes", 1000)
+    max_steps = config.get("training", {}).get("max_steps", 1000)
+    log_interval = config.get("training", {}).get("log_interval", 10)
+    eval_interval = config.get("training", {}).get("eval_interval", 50)
+    save_interval = config.get("training", {}).get("save_interval", 100)
+    checkpoint_dir = Path(config.get("training", {}).get("checkpoint_dir", "checkpoints"))
     
     # Create progress bar
-    pbar = tqdm(range(1, max_episodes + 1), desc="Training", unit="episode")
+    pbar = tqdm(range(1, num_episodes + 1), desc="Training", unit="episode")
     
     # Initialize optimizers
     optimizers = agent.configure_optimizers()
@@ -243,7 +246,7 @@ def train():
             try:
                 # Train discriminator
                 optimizer_d.zero_grad()
-                with torch.cuda.amp.autocast(enabled=agent.device.type == 'cuda'):
+                with torch.amp.autocast(device_type='cuda' if agent.device.type == 'cuda' else 'cpu', enabled=agent.device.type == 'cuda'):
                     loss_d = agent.training_step(None, episode, optimizer_idx=0)
                 scaler.scale(loss_d).backward()
                 scaler.step(optimizer_d)
@@ -251,7 +254,7 @@ def train():
                 
                 # Train policy
                 optimizer_p.zero_grad()
-                with torch.cuda.amp.autocast(enabled=agent.device.type == 'cuda'):
+                with torch.amp.autocast(device_type='cuda' if agent.device.type == 'cuda' else 'cpu', enabled=agent.device.type == 'cuda'):
                     loss_p = agent.training_step(None, episode, optimizer_idx=1)
                 scaler.scale(loss_p).backward()
                 scaler.step(optimizer_p)
@@ -290,7 +293,7 @@ def train():
             agent.train()
         
 
-        if (episode + 1) % save_interval == 0 or episode == max_episodes - 1:
+        if (episode + 1) % save_interval == 0 or episode == num_episodes - 1:
             os.makedirs(checkpoint_dir, exist_ok=True)
             checkpoint_path = os.path.join(checkpoint_dir, f"diayn_episode_{episode+1}.ckpt")
             torch.save({
