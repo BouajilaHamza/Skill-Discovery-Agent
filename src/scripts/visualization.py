@@ -9,10 +9,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import torch
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 import imageio
-from pathlib import Path
-
+import pickle
 
 def plot_training_metrics(metrics: Dict[str, Any], output_dir: str) -> None:
     """Plot and save training metrics.
@@ -102,6 +101,25 @@ def save_episode_as_gif(frames: list, output_path: str, duration: float = 0.1) -
     imageio.mimsave(output_path, frames, duration=duration, loop=0)
 
 
+def load_metrics_safely(metrics_path: str) -> dict:
+    """Safely load metrics with PyTorch 2.6+ compatibility."""
+    from torch.serialization import add_safe_globals
+    
+    # Add numpy's scalar type to safe globals for loading
+    add_safe_globals([np._core.multiarray.scalar])
+    
+    try:
+        # First try with weights_only=True (safer)
+        return torch.load(metrics_path, 
+                       map_location=torch.device('cpu'),
+                       weights_only=True)
+    except (pickle.UnpicklingError, RuntimeError) as e:
+        print(f"Falling back to less secure loading method: {e}")
+        # Fall back to weights_only=False if needed (less secure)
+        return torch.load(metrics_path,
+                       map_location=torch.device('cpu'),
+                       weights_only=False)
+
 def visualize_training_run(log_dir: str) -> None:
     """Generate all visualizations for a training run.
     
@@ -113,8 +131,8 @@ def visualize_training_run(log_dir: str) -> None:
         print(f"No metrics found at {metrics_path}")
         return
     
-    # Load metrics
-    metrics = torch.load(metrics_path)
+    # Load metrics safely
+    metrics = load_metrics_safely(metrics_path)
     
     # Create visualizations directory
     viz_dir = os.path.join(log_dir, 'visualizations')
