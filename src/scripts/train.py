@@ -79,10 +79,13 @@ def train():
     config["agent"]["action_dim"] = env.action_space.n
     
 
+    # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    agent = DIAYNAgent(config)
-    agent.to(device)
-    agent.device = device  
+    
+    # Initialize agent with config and move to device
+    agent = DIAYNAgent(config).to(device)
+    
+    # Ensure all modules are on the correct device
     for module in agent.modules():
         module.to(device)
 
@@ -98,7 +101,7 @@ def train():
         name="diayn",
         version=timestamp
     )
-    
+        
 
     checkpoint_dir = os.path.join(log_dir, "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
