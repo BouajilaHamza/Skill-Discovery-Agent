@@ -1,19 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import pytorch_lightning as pl
+import torch.cuda.amp as amp
 import numpy as np
-from typing import Dict,Any,Tuple,List
-from collections import deque,namedtuple
+from collections import deque, namedtuple
+import random
+from typing import Optional, Tuple, Dict, List, Any
 
-
-from src.agents.base_agent import BaseAgent
-from src.models.base_model import BaseModel
-
-
-Transition = namedtuple("Transition",
-                        ["state","action","skill","next_state","done","reward"])
-
+# Define transition tuple
+Transition = namedtuple('Transition', 
+                       ('state', 'action', 'skill', 'next_state', 'done', 'reward'))
 
 class MiniGridEncoder(BaseModel):
     """Encoder for the MiniGrid environment So that it can be used in the DIAYN agent
@@ -140,7 +136,7 @@ class DIAYNAgent(BaseAgent):
         self.entropy_coeff = float(config.get("entropy_coeff", 0.01))
         self.batch_size = int(config.get("batch_size", 64))
         self.replay_size = int(config.get("replay_size", 10000))
-        
+        self.entropy_coef = float(config.get("entropy_coef", 0.01))
         
         #Models
         self.encoder = MiniGridEncoder(self.obs_shape,
@@ -199,49 +195,81 @@ class DIAYNAgent(BaseAgent):
         obs = torch.FloatTensor(obs).unsqueeze(0).to(self.device) if not isinstance(obs,torch.Tensor) else obs
         return self.forward(obs,skill,deterministic).cpu().numpy().item()
     
-    def training_step(self,batch,batch_idx,optimizer_idx):
-        """Training step for the agent"""
-        states,actions,skills,next_states,dones,rewards = self._sample_batch()
+    def training_step(self, batch, batch_idx, optimizer_idx):
+        """
+        Perform a single training step with mixed precision support.
         
-        states_enc = self.encoder(states)
-        next_states_enc = self.encoder(next_states)
+        Args:
+            batch: Batch of transitions
+            batch_idx: Batch index
+            optimizer_idx: Index of the optimizer (0: discriminator, 1: policy)
+            
+        Returns:
+            dict: Dictionary containing loss and other metrics
+        """
+        states, actions, skills, next_states, dones, rewards = self._unpack_batch(batch)
         
-        #Train Discriminator
-        if optimizer_idx == 0:
-            logits = self.discriminator(next_states_enc).to(self.device)
-            loss_d = F.cross_entropy(logits,skills.argmax(dim=-1)).to(self.device)
-            self.log("train/loss_discriminator",loss_d)
-            return loss_d
-            
-        
-        #Compute Policy
-        if optimizer_idx == 1:
-            policy_input = torch.cat([states_enc,skills],dim=-1).to(self.device)
-            logits = self.policy(policy_input).to(self.device)
-            
-            probs = F.softmax(logits,dim=-1).to(self.device)
-            log_probs = F.log_softmax(logits,dim=-1).to(self.device)
-            entropy = - (probs * log_probs).sum(dim=-1).to(self.device)
-            
+        with amp.autocast(enabled=self.device.type == 'cuda'):
+            # Encode states and next_states
             with torch.no_grad():
-                intrinsic_reward = self.discriminator.compute_reward(next_states_enc,skills)
+                states_enc = self.encoder(states)
+                next_states_enc = self.encoder(next_states)
             
-            policy_loss = - (intrinsic_reward + self.entropy_coeff * entropy).mean()
-            self.log("train/loss_policy",policy_loss)
-            self.log("train/entropy",entropy)
-            self.log("train/intrinsic_reward",intrinsic_reward)
+            # Train Discriminator
+            if optimizer_idx == 0:
+                logits = self.discriminator(next_states_enc)
+                loss_d = F.cross_entropy(logits, skills.argmax(dim=-1))
+                self.log("train/loss_discriminator", loss_d, prog_bar=True)
+                return loss_d
+                
+            # Compute Policy
+            if optimizer_idx == 1:
+                policy_input = torch.cat([states_enc, skills], dim=-1)
+                logits = self.policy(policy_input)
+                
+                probs = F.softmax(logits, dim=-1)
+                log_probs = F.log_softmax(logits, dim=-1)
+                entropy = -(probs * log_probs).sum(dim=-1)
+                
+                with torch.no_grad():
+                    intrinsic_reward = self.discriminator.compute_reward(next_states_enc, skills)
+                    
+                # Compute policy gradient loss
+                policy_loss = -(log_probs.gather(1, actions.unsqueeze(1)) * intrinsic_reward.detach()).mean()
+                entropy_loss = -self.entropy_coef * entropy.mean()
+                
+                total_loss = policy_loss + entropy_loss
+                
+                # Log metrics
+                self.log("train/loss_policy", policy_loss, prog_bar=True)
+                self.log("train/entropy", entropy.mean(), prog_bar=True)
+                self.log("train/total_loss", total_loss)
+                self.log("train/avg_intrinsic_reward", intrinsic_reward.mean())
+                
+                return total_loss
             
-            return policy_loss
-            
-    def configure_optimizers(self) -> List[torch.optim.Optimizer]:
-        """Configure optimizers."""
-        opt_d = torch.optim.Adam(self.discriminator.parameters(), lr=self.lr)
-        opt_p = torch.optim.Adam(
-            list(self.encoder.parameters()) + list(self.policy.parameters()),
-            lr=self.lr
+    def configure_optimizers(self):
+        """Configure optimizers for discriminator and policy with weight decay."""
+        # Use AdamW with weight decay
+        opt_d = torch.optim.AdamW(
+            self.discriminator.parameters(), 
+            lr=self.lr,
+            weight_decay=1e-5,
+            eps=1e-5
         )
-        return [opt_d, opt_p]
-    
+        opt_p = torch.optim.AdamW(
+            list(self.encoder.parameters()) + list(self.policy.parameters()),
+            lr=self.lr,
+            weight_decay=1e-5,
+            eps=1e-5
+        )
+        
+        # Learning rate scheduling
+        scheduler_d = torch.optim.lr_scheduler.CosineAnnealingLR(opt_d, T_max=1000)
+        scheduler_p = torch.optim.lr_scheduler.CosineAnnealingLR(opt_p, T_max=1000)
+        
+        return [opt_d, opt_p], [scheduler_d, scheduler_p]   
+        
     def _sample_batch(self):
         """Sample a batch from replay buffer."""
         if len(self.replay_buffer) < self.batch_size:

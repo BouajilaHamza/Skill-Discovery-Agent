@@ -4,7 +4,10 @@ import argparse
 import gymnasium as gym
 import numpy as np
 import torch
+import torch.optim as optim
+import torch.cuda.amp as amp
 from datetime import datetime
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -23,16 +26,37 @@ def load_config(config_path):
         return yaml.safe_load(f)
 
 def collect_rollout(env, agent, max_steps=1000):
-    """Collect a single rollout from the environment."""
+    """Collect a single rollout from the environment with optimized data transfer."""
     obs, _ = env.reset()
     skill = agent._sample_skill()
     episode_reward = 0
     episode_length = 0
     
+    # Pre-allocate tensors on GPU if available
+    if torch.cuda.is_available():
+        obs_buffer = torch.empty((1, *obs["observation"].shape), 
+                               dtype=torch.float32, 
+                               device=agent.device,
+                               pin_memory=True)
+        skill_buffer = torch.empty((1, len(skill)), 
+                                 dtype=torch.float32, 
+                                 device=agent.device,
+                                 pin_memory=True)
+    
     for _ in range(max_steps):
-        # print("agent.device in rollout:",agent.device)
-        obs_tensor = torch.FloatTensor(obs["observation"]).unsqueeze(0).to(agent.device)
-        skill_tensor = torch.FloatTensor(skill).unsqueeze(0).to(agent.device)
+        # Efficient data transfer using pinned memory
+        if torch.cuda.is_available():
+            obs_buffer.copy_(torch.as_tensor(obs["observation"][None, ...], 
+                                          device='cpu'), 
+                          non_blocking=True)
+            skill_buffer.copy_(torch.as_tensor(skill[None, ...], 
+                                            device='cpu'), 
+                            non_blocking=True)
+            obs_tensor = obs_buffer
+            skill_tensor = skill_buffer
+        else:
+            obs_tensor = torch.FloatTensor(obs["observation"]).unsqueeze(0).to(agent.device)
+            skill_tensor = torch.FloatTensor(skill).unsqueeze(0).to(agent.device)
         
 
         with torch.no_grad():
@@ -66,7 +90,11 @@ def train():
     args = parse_args()
     config = load_config(args.config)
     
-
+    # Set up device and mixed precision
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    scaler = amp.GradScaler(enabled=(device.type == 'cuda'))
+    
+    # Create environment
     env = gym.make(config["env_id"], render_mode="rgb_array")
     env = MiniGridWrapper(
         env, 
@@ -78,19 +106,16 @@ def train():
     config["agent"]["obs_shape"] = env.observation_space["observation"].shape
     config["agent"]["action_dim"] = env.action_space.n
     
-
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(device)
     # Initialize agent with config and move to device
     agent = DIAYNAgent(config).to(device)
+    agent.train()
     
-    # Ensure all modules are on the correct device
-    for module in agent.modules():
-        module.to(device)
+    # Enable cuDNN benchmarking for optimal performance
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
-
-    
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = os.path.join(args.log_dir, f"diayn_{timestamp}")
