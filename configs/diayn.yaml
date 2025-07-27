@@ -44,7 +44,7 @@ agent:
 # ===== Training Configuration =====
 training:
   # Training procedure
-  max_episodes: 1000  # Maximum number of training episodes
+  max_episodes: 100000 # Maximum number of training episodes
   max_steps_per_episode: 200  # Maximum steps per episode
   
   # Logging and evaluation

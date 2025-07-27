@@ -79,7 +79,14 @@ def train():
     config["agent"]["action_dim"] = env.action_space.n
     
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     agent = DIAYNAgent(config)
+    agent.to(device)
+    agent.device = device  
+    for module in agent.modules():
+        module.to(device)
+
+
     
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
