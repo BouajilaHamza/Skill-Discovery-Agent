@@ -24,7 +24,7 @@ agent:
   skill_dim: 8  # Number of discrete skills to learn
   
   # Network architecture
-  hidden_dim: 64  # Hidden layer size for all networks
+  hidden_dim: 256  # Hidden layer size for all networks
   
   # Training hyperparameters
   lr: 3e-4  # Learning rate
@@ -32,8 +32,8 @@ agent:
   entropy_coef: 0.1  # Entropy coefficient for policy gradient
   
   # Replay buffer
-  batch_size: 128  # Batch size for training
-  replay_size: 10000  # Maximum replay buffer size
+  batch_size: 512  # Batch size for training
+  replay_size: 50000  # Maximum replay buffer size
   
   # Intrinsic reward scaling
   intrinsic_reward_scale: 1.0  # Scale factor for intrinsic rewards
@@ -48,12 +48,12 @@ training:
   max_steps_per_episode: 200  # Maximum steps per episode
   
   # Logging and evaluation
-  log_interval: 10  # Log metrics every N episodes
-  eval_interval: 50  # Evaluate every N episodes
-  eval_episodes: 5  # Number of evaluation episodes
+  log_interval: 100  # Log metrics every N episodes
+  eval_interval: 500  # Evaluate every N episodes
+  eval_episodes: 50  # Number of evaluation episodes
   
   # Checkpointing
-  save_interval: 100  # Save model every N episodes
+  save_interval: 10000  # Save model every N episodes
   
   # Early stopping (optional)
   early_stop_reward: None  # Stop training if average reward exceeds this value
@@ -65,7 +65,7 @@ logging:
   project_name: "skill-discovery"  # Project name for experiment tracking
   use_tensorboard: true  # Enable TensorBoard logging
   save_video: false  # Save video of agent's performance
-  video_interval: 100  # Save video every N episodes
+  video_interval: 1000  # Save video every N episodes
 
 # ===== Notes =====
 # 1. obs_shape and action_dim will be automatically set based on the environment
