@@ -34,15 +34,17 @@ def train():
     config["agent"]["action_dim"] = env.action_space.n
     
 
+    # Create unique log directory with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = os.path.join(args.log_dir, f"diayn_{timestamp}")
     os.makedirs(log_dir, exist_ok=True)
-    writer = SummaryWriter(log_dir="logs/diayn")
-
-
-    agent = DIAYNAgent(config["agent"], writer=writer).to(device)
     
+    # Initialize TensorBoard writer with the correct log directory
+    writer = SummaryWriter(log_dir=log_dir)
+    print(f"TensorBoard logs will be saved to: {os.path.abspath(log_dir)}")
 
+
+    agent = DIAYNAgent(config["agent"], writer=writer, log_dir=log_dir).to(device)
     agent.log_model_graph()
     
     # Training parameters

@@ -1,3 +1,4 @@
+import os
 import torch
 import random
 import numpy as np
@@ -8,8 +9,8 @@ from typing import Dict, Any, Tuple, Optional
 from torch.utils.tensorboard import SummaryWriter
 
 from src.agents.base_agent import BaseAgent
-from src.models.minigrid_model import MiniGridEncoder
-from src.models.descriminator_model import SkillDiscriminator
+from src.models.encoder import MiniGridEncoder
+from src.models.descriminator import SkillDiscriminator
 
 
 Transition = namedtuple('Transition', 
@@ -19,15 +20,17 @@ Transition = namedtuple('Transition',
 class DIAYNAgent(BaseAgent):
     """Diversity is All You Need (DIAYN) agent implementation."""
     
-    def __init__(self, config: Dict[str, Any], writer: Optional[SummaryWriter] = None):
+    def __init__(self, config: Dict[str, Any], writer: Optional[SummaryWriter] = None, log_dir: Optional[str] = None):
         """Initialize the DIAYN agent.
         
         Args:
             config: Configuration dictionary containing agent parameters
             writer: TensorBoard SummaryWriter for logging
+            log_dir: Directory for logging
         """
         super().__init__(config, writer)
         
+        self.log_dir = log_dir
         # Environment parameters
         self.obs_shape = config["obs_shape"]
         self.action_dim = config["action_dim"]
@@ -55,7 +58,7 @@ class DIAYNAgent(BaseAgent):
         
         # Discriminator network
         self.discriminator = SkillDiscriminator(
-            state_dim=self.encoder.feature_dim,
+            input_dim=self.encoder.feature_dim,
             skill_dim=self.skill_dim,
             hidden_dim=config.get("hidden_dim", 256)
         )
@@ -263,29 +266,44 @@ class DIAYNAgent(BaseAgent):
         self.to(self.device)
     
     def log_model_graph(self) -> None:
-        """Log the model graph to TensorBoard."""
-        if self.writer is not None:
-            try:
-                # Create dummy inputs
-                dummy_obs = torch.zeros(1, *self.obs_shape).to(self.device)
-                dummy_skill = torch.zeros(1, self.skill_dim).to(self.device)
-                
-                # Create a wrapper module for the forward pass
-                class ForwardWrapper(nn.Module):
-                    def __init__(self, model):
-                        super().__init__()
-                        self.model = model
-                    def forward(self, obs, skill):
-                        return self.model(obs, skill)
-                
-                # Add graph to TensorBoard
-                self.writer.add_graph(
-                    ForwardWrapper(self),
-                    (dummy_obs, dummy_skill)
-                )
-                self.writer.flush()
-            except Exception as e:
-                print(f"Failed to log model graph: {e}")
+        if self.writer is None:
+            return
+        if not all(hasattr(self, attr) for attr in ['encoder', 'policy', 'discriminator']):
+            print("Graph logging skipped: model parts not initialized.")
+            return
+
+        dummy_obs = torch.zeros((1, *self.obs_shape), device=self.device)
+        dummy_skill = torch.zeros((1, self.skill_dim), device=self.device)
+
+        # Policy wrapper
+        class PolicyWrapper(nn.Module):
+            def __init__(self, agent):
+                super().__init__()
+                self.encoder = agent.encoder
+                self.policy = agent.policy
+            def forward(self, obs, skill):
+                encoded = self.encoder(obs)
+                return self.policy(torch.cat([encoded, skill], dim=-1))
+
+        # Discriminator wrapper
+        class DiscriminatorWrapper(nn.Module):
+            def __init__(self, agent):
+                super().__init__()
+                self.encoder = agent.encoder
+                self.discriminator = agent.discriminator
+            def forward(self, obs):
+                return self.discriminator(self.encoder(obs))
+
+        # Write policy graph in its own run
+        writer_policy = SummaryWriter(log_dir=os.path.join(self.log_dir, "policy_graph"))
+        writer_policy.add_graph(PolicyWrapper(self), (dummy_obs, dummy_skill))
+        writer_policy.flush()
+
+        # Write discriminator graph in separate run
+        writer_disc = SummaryWriter(log_dir=os.path.join(self.log_dir, "discriminator_graph"))
+        writer_disc.add_graph(DiscriminatorWrapper(self), (dummy_obs,))
+        writer_disc.flush()
+
     
     def sample_skill(self) -> np.ndarray:
         """Sample a random one-hot skill vector."""

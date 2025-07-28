@@ -13,6 +13,7 @@ dependencies = [
  "seaborn>=0.13.2",
  "tensorboard>=2.20.0",
  "torch>=2.7.1",
+ "tqdm>=4.67.1",
 ]
 
 [project.optional-dependencies]
