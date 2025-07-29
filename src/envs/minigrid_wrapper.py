@@ -3,7 +3,6 @@ import numpy as np
 from gymnasium import spaces
 
 
-
 class MiniGridWrapper(gym.Wrapper):
     """Wrapper for the MiniGrid environment"""
     def __init__(self,env,skill_dim=8,obs_type="rgb"):
@@ -53,4 +52,13 @@ class MiniGridWrapper(gym.Wrapper):
             "observation":obs_array,
             "skill":skill
         }
+        
+
+class ObservationExtractor(gym.ObservationWrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.observation_space = self.env.observation_space['observation']
+        
+    def observation(self, obs):
+        return obs['observation']
         

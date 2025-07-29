@@ -1,185 +1,120 @@
 import os
-import yaml
-import argparse
-import gymnasium as gym
-import numpy as np
 import torch
-from datetime import datetime
+import numpy as np
 from tqdm import tqdm
-from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.callbacks import ModelCheckpoint
+from datetime import datetime
+from torch.utils.tensorboard import SummaryWriter
+from gymnasium.vector.sync_vector_env import SyncVectorEnv
 
 from src.agents.diayn_agent import DIAYNAgent
-from src.envs.minigrid_wrapper import MiniGridWrapper
+from src.utils.train_utils import parse_args, load_config, evaluate
+from src.utils.env_utils import make_env
 
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="configs/diayn.yaml")
-    parser.add_argument("--log_dir", type=str, default="logs")
-    return parser.parse_args()
-
-def load_config(config_path):
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
-
-def collect_rollout(env, agent, max_steps=1000):
-    """Collect a single rollout from the environment."""
-    obs, _ = env.reset()
-    skill = agent._sample_skill()
-    episode_reward = 0
-    episode_length = 0
-    
-    for _ in range(max_steps):
-        # Convert observation to tensor and add batch dimension
-        obs_tensor = torch.FloatTensor(obs["observation"]).unsqueeze(0).to(agent.device)
-        skill_tensor = torch.FloatTensor(skill).unsqueeze(0).to(agent.device)
-        
-
-        with torch.no_grad():
-            action = agent.forward(obs_tensor, skill_tensor, deterministic=False)
-            action = action.item()
-        
-        next_obs, reward, terminated, truncated, _ = env.step(action)
-        done = terminated or truncated
-        
-        # Store transition in replay buffer
-        agent.add_to_replay(
-            obs["observation"],
-            action,
-            skill,
-            next_obs["observation"],
-            done,
-            reward
-        )
-        
-        episode_reward += reward
-        episode_length += 1
-        
-        obs = next_obs
-        
-        if done:
-            break
-    
-    return episode_reward, episode_length
 
 def train():
     args = parse_args()
     config = load_config(args.config)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device_name = torch.cuda.get_device_name(device) if torch.cuda.is_available() else "CPU"
+    
+    print(f"Using device: {device} | Device  Name: {device_name}")
+    # seed = config.get("seed", 42)
+    # torch.manual_seed(seed)
+    # np.random.seed(seed)
+    
+    # Create  vectorized environments
+    num_envs = config.get("training", {}).get("env_parallel", 1)
+    env_thunks = [make_env(config["env_id"], config.get("obs_type", "rgb")) for _ in range(num_envs)]
+    print(env_thunks[0])
+    env = SyncVectorEnv(env_thunks) 
+
+    sample_obs = env.reset()[0]  # env.reset() returns (obs, info)
+    print(sample_obs.shape)
+    config["agent"]["obs_shape"] = sample_obs.shape[1:]
+    config["agent"]["action_dim"] = env.action_space.nvec[0]
     
 
-    env = gym.make(config["env_id"], render_mode="rgb_array")
-    env = MiniGridWrapper(
-        env, 
-        skill_dim=config["agent"]["skill_dim"],
-        obs_type=config["obs_type"]
-    )
-    
-    # Update obs_shape in config
-    config["agent"]["obs_shape"] = env.observation_space["observation"].shape
-    config["agent"]["action_dim"] = env.action_space.n
-    
-
-    agent = DIAYNAgent(config)
-    
-
+    # Create unique log directory with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = os.path.join(args.log_dir, f"diayn_{timestamp}")
     os.makedirs(log_dir, exist_ok=True)
     
-    logger = TensorBoardLogger(
-        save_dir=args.log_dir,
-        name="diayn",
-        version=timestamp
-    )
-    
+    # Initialize TensorBoard writer with the correct log directory
+    writer = SummaryWriter(log_dir=log_dir)
+    print(f"TensorBoard logs will be saved to: {os.path.abspath(log_dir)}")
 
-    checkpoint_dir = os.path.join(log_dir, "checkpoints")
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=checkpoint_dir,
-        filename="diayn-{epoch:03d}",
-        save_top_k=3,
-        monitor="train/avg_reward",
-        mode="max",
-    )
-    
-    max_episodes = config["training"]["max_episodes"]
-    eval_interval = config["training"].get("eval_interval", 10)
-    save_interval = config["training"].get("save_interval", 100)
 
+    agent = DIAYNAgent(config["agent"], writer=writer, log_dir=log_dir).to(device)
+    agent.log_model_graph()
+
+    training_cfg = config.get("training", {})
+    print(training_cfg.keys())
+    num_episodes = training_cfg.get("max_episodes", 1000)
+    eval_interval = training_cfg.get("eval_interval", 100)
+    save_interval = training_cfg.get("save_interval", 100)
+    
+    # Training loop
+    # best_reward = -float('inf')
     episode_rewards = []
     episode_lengths = []
     
-    pbar = tqdm(range(max_episodes), desc="Training")
+    # Create checkpoint directory
+    checkpoint_dir = os.path.join(log_dir, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
     
-    optimizer_d, optimizer_p = agent.configure_optimizers()
+    # Training progress bar
+    pbar = tqdm(range(1, num_episodes + 1), desc="Training")
     
     for episode in pbar:
-        agent.train()        
-        episode_reward, episode_length = collect_rollout(env, agent)
-        
-        episode_rewards.append(episode_reward)
-        episode_lengths.append(episode_length)
-        
-        avg_reward = np.mean(episode_rewards[-100:])
-        avg_length = np.mean(episode_lengths[-100:])
-        
-        # Log to TensorBoard if logger is available
-        if logger:
-            logger.experiment.add_scalar("train/episode_reward", episode_reward, episode)
-            logger.experiment.add_scalar("train/episode_length", episode_length, episode)
-            logger.experiment.add_scalar("train/avg_reward", avg_reward, episode)
-            logger.experiment.add_scalar("train/avg_length", avg_length, episode)
-        
-        pbar.set_postfix({
-            "reward": f"{episode_reward:.1f}",
-            "avg_reward": f"{avg_reward:.1f}",
-            "length": episode_length
-        })
+        try:
+            # Clear CUDA cache periodically
+            if episode % 10 == 0 and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
+        except Exception as e:
+            print(f"Error during episode {episode}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            continue
         
         # Perform training step
+        writer.add_scalar('train/replay_buffer_size', len(agent.replay_buffer), episode)
+        writer.add_scalar('train/batch_size', agent.batch_size, episode)
         if len(agent.replay_buffer) >= agent.batch_size:
-            # Train discriminator
-            optimizer_d.zero_grad()
-            loss_d = agent.training_step(None, episode, optimizer_idx=0)
-            loss_d.backward()
-            optimizer_d.step()
+            try:
+                batch = agent.sample_batch(agent.batch_size)
+                if batch is None:
+                    continue
+
+                # Update both discriminator and policy
+                loss_d, loss_p = agent.update(batch, episode)
+                
+                # if writer is not None:
+                #     writer.add_scalar('train/discriminator_loss', loss_d, episode)
+                #     writer.add_scalar('train/policy_loss', loss_p, episode)
+                #     writer.add_scalar('train/replay_buffer_size', len(agent.replay_buffer), episode)
+
+            except RuntimeError as e:
+                print(f"Error during training step: {str(e)}")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()  # Wait for all kernels to finish
             
-            # Train policy
-            optimizer_p.zero_grad()
-            loss_p = agent.training_step(None, episode, optimizer_idx=1)
-            loss_p.backward()
-            optimizer_p.step()
-            
-            if logger:
-                logger.experiment.add_scalar("train/loss_discriminator", loss_d.item(), episode)
-                logger.experiment.add_scalar("train/loss_policy", loss_p.item(), episode)
-        
         # Perform evaluation
         if (episode + 1) % eval_interval == 0:
-            agent.eval()
-            eval_rewards = []
-            with torch.no_grad():
-                for _ in range(5):
-                    eval_reward, _ = collect_rollout(env, agent)
-                    eval_rewards.append(eval_reward)
-            
-            avg_eval_reward = np.mean(eval_rewards)
-            if logger:
-                logger.experiment.add_scalar("eval/avg_reward", avg_eval_reward, episode)
-            
-            agent.train()
+            _avg_eval_reward = evaluate(env, agent, num_episodes=5, episode=episode, writer=writer)
         
 
-        if (episode + 1) % save_interval == 0 or episode == max_episodes - 1:
+        if (episode + 1) % save_interval == 0 or episode == num_episodes - 1:
             os.makedirs(checkpoint_dir, exist_ok=True)
             checkpoint_path = os.path.join(checkpoint_dir, f"diayn_episode_{episode+1}.ckpt")
             torch.save({
                 'episode': episode,
                 'model_state_dict': agent.state_dict(),
-                'optimizer_d_state_dict': optimizer_d.state_dict(),
-                'optimizer_p_state_dict': optimizer_p.state_dict(),
+                'optimizer_d_state_dict': agent.optimizer_d.state_dict(),
+                'optimizer_p_state_dict': agent.optimizer_p.state_dict(),
                 'episode_rewards': episode_rewards,
                 'episode_lengths': episode_lengths,
                 'config': config
@@ -189,6 +124,8 @@ def train():
     final_model_path = os.path.join(checkpoint_dir, "diayn_final.pt")
     torch.save({
         'model_state_dict': agent.state_dict(),
+        'optimizer_d_state_dict': agent.optimizer_d.state_dict(),
+        'optimizer_p_state_dict': agent.optimizer_p.state_dict(),
         'config': config
     }, final_model_path)
     print(f"\nTraining complete! Final model saved to {final_model_path}")
