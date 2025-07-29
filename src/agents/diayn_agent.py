@@ -1,288 +1,337 @@
+import os
 import torch
+import random
+import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
-import pytorch_lightning as pl
-import numpy as np
-from typing import Dict,Any,Tuple,List
-from collections import deque,namedtuple
-
+from collections import deque, namedtuple
+from typing import Dict, Any, Tuple, Optional
+from torch.utils.tensorboard import SummaryWriter
 
 from src.agents.base_agent import BaseAgent
-from src.models.base_model import BaseModel
+from src.models.encoder import MiniGridEncoder
+from src.models.descriminator import SkillDiscriminator
 
 
-Transition = namedtuple("Transition",
-                        ["state","action","skill","next_state","done","reward"])
-
-
-class MiniGridEncoder(BaseModel):
-    """Encoder for the MiniGrid environment So that it can be used in the DIAYN agent
-    
-    Args:
-        input_shape (Tuple[int]): The shape of the input observation.
-        hidden_size (int): The size of the hidden layer.
-    
-    Returns:
-        torch.Tensor: The encoded observation.
-    """
-    
-    def __init__(self, obs_shape: Tuple[int], feature_dim: int = 64, obs_type: str = "rgb"):
-        super().__init__()
-        self.obs_type = obs_type
-        self.obs_shape = obs_shape
-        
-        # Determine input channels based on observation type
-        self.in_channels = 3 if obs_type == "rgb" else 1
-        
-        # CNN architecture for processing observations
-        self.conv = nn.Sequential(
-            nn.Conv2d(self.in_channels, 16, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.Flatten()
-        )
-        
-
-        with torch.no_grad():
-            # Create a dummy input with correct shape (N, C, H, W)
-            dummy = torch.zeros(1, self.in_channels, *obs_shape[:2])
-            conv_out = self.conv(dummy)
-            self.conv_output_dim = conv_out.shape[1]
-            
-
-        self.fc = nn.Linear(self.conv_output_dim, feature_dim)
-        self.feature_dim = feature_dim
-    
-    def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        """Forward pass of the encoder
-        
-        Args:
-            obs (torch.Tensor): The input observation of shape (batch, H, W, C) or (H, W, C)
-            
-        Returns:
-            torch.Tensor: The encoded observation of shape (batch, hidden_dim)
-        """
-        # Ensure we have a batch dimension
-        if len(obs.shape) == 3:  # (H, W, C) -> (1, H, W, C)
-            obs = obs.unsqueeze(0)
-            
-        # Convert to float and normalize if needed
-        if obs.dtype == torch.uint8:
-            obs = obs.float() / 255.0
-            
-        # Convert from NHWC to NCHW format expected by PyTorch
-        if obs.shape[-1] in [1, 3]:  # If channels are last
-            obs = obs.permute(0, 3, 1, 2)  # NHWC -> NCHW
-            
-        # Ensure we have the right number of channels
-        if self.obs_type == 'rgb' and obs.shape[1] != 3:
-            if obs.shape[1] == 1:  # If grayscale, repeat to 3 channels
-                obs = obs.repeat(1, 3, 1, 1)
-            else:
-                raise ValueError(f"Expected 1 or 3 channels for RGB, got {obs.shape[1]} channels")
-                
-
-        x = self.conv(obs)
-        return torch.relu(self.fc(x))
-    
-
-
-
-
-class SkillDiscriminator(BaseModel):
-    """
-    Skill discriminator for the DIAYN agent
-    
-    Args:
-        input_dim (int): The dimension of the input.
-        hidden_dim (int): The dimension of the hidden layer.
-    
-    Returns:
-        torch.Tensor: The skill discriminator output.
-    """
-    
-    def __init__(self,state_dim,skill_dim,hidden_dim=64):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(state_dim,hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim,hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim,skill_dim)
-        )
-        
-    def forward(self,state:torch.Tensor):
-        return self.net(state)
-    
-    
-    def compute_reward(self,state,skill):
-        logits = self(state)
-        log_probs = F.log_softmax(logits,dim=-1)
-        return (log_probs * skill).sum(dim=-1) + np.log(skill.size(1))
-
+Transition = namedtuple('Transition', 
+                       ('state', 'action', 'skill', 'next_state', 'done', 'reward'))
 
 
 class DIAYNAgent(BaseAgent):
-    """DIAYN agent for the MiniGrid environment"""
-    def __init__(self,config:Dict[str,Any]):
-        super().__init__(config)
+    """Diversity is All You Need (DIAYN) agent implementation."""
+    
+    def __init__(self, config: Dict[str, Any], writer: Optional[SummaryWriter] = None, log_dir: Optional[str] = None):
+        """Initialize the DIAYN agent.
         
-        #Environment parameters
-        self.obs_shape = config["agent"]["obs_shape"]
-        self.action_dim = config["agent"]["action_dim"]
-        self.skill_dim = config.get("skill_dim",8)
-        self.obs_type = config.get("obs_type","rgb")
+        Args:
+            config: Configuration dictionary containing agent parameters
+            writer: TensorBoard SummaryWriter for logging
+            log_dir: Directory for logging
+        """
+        super().__init__(config, writer)
+        
+        self.log_dir = log_dir
+        # Environment parameters
+        self.obs_shape = config["obs_shape"]
+        self.action_dim = config["action_dim"]
+        self.skill_dim = config.get("skill_dim", 8)
         
         # Training parameters
         self.lr = float(config.get("lr", 3e-4))
         self.gamma = float(config.get("gamma", 0.99))
-        self.entropy_coeff = float(config.get("entropy_coeff", 0.01))
         self.batch_size = int(config.get("batch_size", 64))
         self.replay_size = int(config.get("replay_size", 10000))
+        self.entropy_coef = float(config.get("entropy_coef", 0.01))
         
+        # Initialize models
+        self.encoder = MiniGridEncoder(
+            self.obs_shape,
+            feature_dim=config.get("hidden_dim", 64)
+        )
         
-        #Models
-        self.encoder = MiniGridEncoder(self.obs_shape,
-                                       feature_dim = config.get("hidden_dim",64),
-                                       obs_type = self.obs_type
-                                       )
-        
-        #Policy Network 
+        # Policy network
         self.policy = nn.Sequential(
-            nn.Linear(self.encoder.feature_dim + self.skill_dim,64),
+            nn.Linear(self.encoder.feature_dim + self.skill_dim, 256),
             nn.ReLU(),
-            nn.Linear(64,64),
-            nn.ReLU(),
-            nn.Linear(64,self.action_dim)
+            nn.Linear(256, self.action_dim)
         )
         
-        #Discriminator Network
+        # Discriminator network
         self.discriminator = SkillDiscriminator(
-            self.encoder.feature_dim,
-            self.skill_dim,
-            hidden_dim = config.get("hidden_dim",64)
+            input_dim=self.encoder.feature_dim,
+            skill_dim=self.skill_dim,
+            hidden_dim=config.get("hidden_dim", 256)
         )
         
-        #Replay Buffer
+        # Optimizers
+        self.optimizer_d = torch.optim.AdamW(
+            self.discriminator.parameters(),
+            lr=self.lr,
+            weight_decay=1e-5
+        )
+        self.optimizer_p = torch.optim.AdamW(
+            list(self.encoder.parameters()) + list(self.policy.parameters()),
+            lr=self.lr,
+            weight_decay=1e-5
+        )
+        
+        # Learning rate schedulers
+        self.scheduler_d = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer_d, T_max=1000
+        )
+        self.scheduler_p = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer_p, T_max=1000
+        )
+        
+        # Replay buffer
         self.replay_buffer = deque(maxlen=self.replay_size)
         
-        #Metrics
-        self.episode_rewards = []
-        self.episode_lengths = []
-        
-    def forward(self,obs:torch.Tensor,skill:torch.Tensor,deterministic:bool=False) -> torch.Tensor:
+        # Move to device
+        self.to(self.device)
+    
+    
+    
+    
+    def forward(self, obs: torch.Tensor, skill: torch.Tensor) -> torch.Tensor:
+        """Forward pass through the agent."""
+        encoded = self.encoder(obs)
+        x = torch.cat([encoded, skill], dim=-1)
+        return self.policy(x)
+    
+    
+    
+    
+    def act(self, obs: Dict[str, Any], skill: np.ndarray, deterministic: bool = False) -> int:
         """
-        Forward pass of the agent
-        Args: 
-            obs (torch.Tensor): The observation.
-            skill (torch.Tensor): The skill.
+        Select an action given an observation and skill.
+        Args:
+            obs: Observation from the environment
+            skill: Skill vector
+            deterministic: Whether to sample deterministically
+            
         Returns:
-            torch.Tensor: The action.
+            Action to take
         """
         with torch.no_grad():
-            encoded_obs = self.encoder(obs) #return the state in latent space
-            x = torch.cat([encoded_obs,skill],dim=-1)
-            logits = self.policy(x)
+            obs_tensor = torch.FloatTensor(obs["observation"]).unsqueeze(0).to(self.device)
+            skill_tensor = torch.FloatTensor(skill).unsqueeze(0).to(self.device)
+            logits = self.forward(obs_tensor, skill_tensor)
+            
             if deterministic:
-                return torch.argmax(logits,dim=-1)
+                action = torch.argmax(logits, dim=-1)
             else:
-                probs = F.softmax(logits,dim=-1)
-                return torch.multinomial(probs,1).squeeze(-1)
+                probs = F.softmax(logits, dim=-1)
+                action = torch.multinomial(probs, num_samples=1)
+                
+            return action.item()
+    
+    def update(self, batch: Dict[str, torch.Tensor], step: int) -> Tuple[float, float]:
+        """Update the agent's parameters using a batch of experiences.
+        
+        Args:
+            batch: Batch of transitions
+            step: Current training step (for logging)
             
-    
-    def act(self,obs:torch.Tensor,skill:torch.Tensor=None,deterministic:bool=False) -> torch.Tensor:
-        """Select an action given the observation and skill"""
-        if skill is None:
-            skill = self._sample_skill()
-        skill = torch.FloatTensor(skill).unsqueeze(0).to(self.device) if not isinstance(skill,torch.Tensor) else skill
-        obs = torch.FloatTensor(obs).unsqueeze(0).to(self.device) if not isinstance(obs,torch.Tensor) else obs
-        return self.forward(obs,skill,deterministic).cpu().numpy().item()
-    
-    def training_step(self,batch,batch_idx,optimizer_idx):
-        """Training step for the agent"""
-        states,actions,skills,next_states,dones,rewards = self._sample_batch()
+        Returns:
+            Tuple of (discriminator_loss, policy_loss)
+        """
+        # Unpack batch
+        states = batch["state"].to(self.device)
+        actions = batch["action"].to(self.device)
+        skills = batch["skill"].to(self.device)
+        next_states = batch["next_state"].to(self.device)
+        dones = batch["done"].to(self.device)
         
-        states_enc = self.encoder(states)
-        next_states_enc = self.encoder(next_states)
-        
-        #Train Discriminator
-        if optimizer_idx == 0:
+        # Train discriminator
+        with torch.amp.autocast(device_type=self.device.type, enabled=self.device.type == 'cuda'):
+            # Encode states
+            states_enc = self.encoder(states)
+            next_states_enc = self.encoder(next_states).detach()
+            
+            # Train discriminator
             logits = self.discriminator(next_states_enc)
-            loss_d = F.cross_entropy(logits,skills.argmax(dim=-1))
-            self.log("train/loss_discriminator",loss_d)
-            return loss_d
+            loss_d = F.cross_entropy(logits, skills.argmax(dim=-1))
             
-        
-        #Compute Policy
-        if optimizer_idx == 1:
-            policy_input = torch.cat([states_enc,skills],dim=-1)
+            # Train policy
+            policy_input = torch.cat([states_enc, skills], dim=-1)
             logits = self.policy(policy_input)
+            probs = F.softmax(logits, dim=-1)
+            log_probs = F.log_softmax(logits, dim=-1)
+            entropy = -(probs * log_probs).sum(dim=-1)
             
-            probs = F.softmax(logits,dim=-1)
-            log_probs = F.log_softmax(logits,dim=-1)
-            entropy = - (probs * log_probs).sum(dim=-1)
-            
+            # Compute intrinsic reward
             with torch.no_grad():
-                intrinsic_reward = self.discriminator.compute_reward(next_states_enc,skills)
+                pred_skill_probs = F.softmax(self.discriminator(next_states_enc), dim=-1)
+                log_pred_skill_probs = torch.log(pred_skill_probs + 1e-6)
+                intrinsic_reward = (log_pred_skill_probs * skills).sum(dim=-1)
+                
+            # Compute policy loss
+            policy_loss = -(log_probs.gather(1, actions.unsqueeze(1)) * intrinsic_reward.unsqueeze(1)).mean()
+            entropy_loss = -self.entropy_coef * entropy.mean()
+            loss_p = policy_loss + entropy_loss
             
-            policy_loss = - (intrinsic_reward + self.entropy_coeff * entropy).mean()
-            self.log("train/loss_policy",policy_loss)
-            self.log("train/entropy",entropy)
-            self.log("train/intrinsic_reward",intrinsic_reward)
-            
-            return policy_loss
-            
-    def configure_optimizers(self) -> List[torch.optim.Optimizer]:
-        """Configure optimizers."""
-        opt_d = torch.optim.Adam(self.discriminator.parameters(), lr=self.lr)
-        opt_p = torch.optim.Adam(
+        # Update discriminator
+        self.optimizer_d.zero_grad()
+        loss_d.backward()
+        torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), 0.5)
+        self.optimizer_d.step()
+        
+        # Update policy
+        self.optimizer_p.zero_grad()
+        loss_p.backward()
+        torch.nn.utils.clip_grad_norm_(
             list(self.encoder.parameters()) + list(self.policy.parameters()),
-            lr=self.lr
+            0.5
         )
-        return [opt_d, opt_p]
-    
-    def _sample_batch(self):
-        """Sample a batch from replay buffer."""
-        if len(self.replay_buffer) < self.batch_size:
-            batch_size = len(self.replay_buffer)
-        else:
-            batch_size = self.batch_size
+        self.optimizer_p.step()
+        
+        # Update learning rates
+        self.scheduler_d.step()
+        self.scheduler_p.step()
+        
+        # Log metrics
+        if self.writer is not None:
+            self.writer.add_scalar('train/discriminator_loss', loss_d.item(), step)
+            self.writer.add_scalar('train/policy_loss', loss_p.item(), step)
+            self.writer.add_scalar('train/entropy', entropy.mean().item(), step)
+            self.writer.add_scalar('train/intrinsic_reward', intrinsic_reward.mean().item(), step)
             
-        # Sample random indices
-        indices = np.random.choice(len(self.replay_buffer), size=batch_size, replace=False)
-        transitions = [self.replay_buffer[i] for i in indices]
+            # Log learning rates
+            self.writer.add_scalar('lr/discriminator', self.scheduler_d.get_last_lr()[0], step)
+            self.writer.add_scalar('lr/policy', self.scheduler_p.get_last_lr()[0], step)
+        
+        return loss_d.item(), loss_p.item()
+    
+    def add_to_replay(self, transition: Transition) -> None:
+        """Add a transition to the replay buffer."""
+        self.replay_buffer.append(transition)
+    
+    def sample_batch(self, batch_size: int) -> Dict[str, torch.Tensor]:
+        """
+        Sample a batch of transitions from the replay buffer.
+        Args:
+            batch_size: Number of transitions to sample
+        Returns:
+            Dictionary containing batched tensors for states, actions, skills, next_states, dones, rewards.
+        """
+        if len(self.replay_buffer) < batch_size:
+            return None
+
+        transitions = random.sample(self.replay_buffer, batch_size)
         batch = Transition(*zip(*transitions))
+        states = torch.stack([torch.FloatTensor(s) for s in batch.state])
+        actions = torch.LongTensor(batch.action)
+        skills = torch.FloatTensor(np.array(batch.skill))
+        next_states = torch.stack([torch.FloatTensor(s) for s in batch.next_state])
+        dones = torch.FloatTensor(batch.done)
+        rewards = torch.FloatTensor(batch.reward)
+
+        return {
+            'state': states,
+            'action': actions,
+            'skill': skills,
+            'next_state': next_states,
+            'done': dones,
+            'reward': rewards
+        }
+    
+    def save_checkpoint(self, path: str) -> None:
+        """Save agent state to checkpoint."""
+        torch.save({
+            'encoder_state_dict': self.encoder.state_dict(),
+            'policy_state_dict': self.policy.state_dict(),
+            'discriminator_state_dict': self.discriminator.state_dict(),
+            'optimizer_d_state_dict': self.optimizer_d.state_dict(),
+            'optimizer_p_state_dict': self.optimizer_p.state_dict(),
+            'scheduler_d_state_dict': self.scheduler_d.state_dict(),
+            'scheduler_p_state_dict': self.scheduler_p.state_dict(),
+            'replay_buffer': self.replay_buffer,
+            'config': self.config
+        }, path)
+    
+    def load_checkpoint(self, path: str) -> None:
+        """Load agent state from checkpoint."""
+        checkpoint = torch.load(path, map_location=self.device)
+        self.encoder.load_state_dict(checkpoint['encoder_state_dict'])
+        self.policy.load_state_dict(checkpoint['policy_state_dict'])
+        self.discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+        self.optimizer_d.load_state_dict(checkpoint['optimizer_d_state_dict'])
+        self.optimizer_p.load_state_dict(checkpoint['optimizer_p_state_dict'])
+        self.scheduler_d.load_state_dict(checkpoint['scheduler_d_state_dict'])
+        self.scheduler_p.load_state_dict(checkpoint['scheduler_p_state_dict'])
+        self.replay_buffer = checkpoint['replay_buffer']
+        self.config = checkpoint['config']
         
-        return (
-            torch.stack(batch.state),
-            torch.cat(batch.action),
-            torch.stack(batch.skill),
-            torch.stack(batch.next_state),
-            torch.stack(batch.done),
-            torch.stack(batch.reward)
-        )
+        # Move models to device
+        self.to(self.device)
     
+    def log_model_graph(self) -> None:
+        if self.writer is None:
+            return
+        if not all(hasattr(self, attr) for attr in ['encoder', 'policy', 'discriminator']):
+            print("Graph logging skipped: model parts not initialized.")
+            return
+
+        dummy_obs = torch.zeros((1, *self.obs_shape), device=self.device)
+        dummy_skill = torch.zeros((1, self.skill_dim), device=self.device)
+
+        # Policy wrapper
+        class PolicyWrapper(nn.Module):
+            def __init__(self, agent):
+                super().__init__()
+                self.encoder = agent.encoder
+                self.policy = agent.policy
+            def forward(self, obs, skill):
+                encoded = self.encoder(obs)
+                return self.policy(torch.cat([encoded, skill], dim=-1))
+
+        # Discriminator wrapper
+        class DiscriminatorWrapper(nn.Module):
+            def __init__(self, agent):
+                super().__init__()
+                self.encoder = agent.encoder
+                self.discriminator = agent.discriminator
+            def forward(self, obs):
+                return self.discriminator(self.encoder(obs))
+
+        # Write policy graph in its own run
+        writer_policy = SummaryWriter(log_dir=os.path.join(self.log_dir, "policy_graph"))
+        writer_policy.add_graph(PolicyWrapper(self), (dummy_obs, dummy_skill))
+        writer_policy.flush()
+
+        # Write discriminator graph in separate run
+        writer_disc = SummaryWriter(log_dir=os.path.join(self.log_dir, "discriminator_graph"))
+        writer_disc.add_graph(DiscriminatorWrapper(self), (dummy_obs,))
+        writer_disc.flush()
+
     
-    def _sample_skill(self):
-        """Sample a random one-hot skill vector"""
-        skill = np.zeros(self.skill_dim)
-        skill[np.random.randint(self.skill_dim)] = 1
+    def sample_skill(self) -> np.ndarray:
+        """Sample a random one-hot skill vector."""
+        skill_idx = np.random.randint(0, self.skill_dim)
+        skill = np.zeros(self.skill_dim, dtype=np.float32)
+        skill[skill_idx] = 1.0
         return skill
-
     
-    def add_to_replay(self,state,action,skill,next_state,done,reward):
-        
-        """Add transition to replay buffer."""
-        self.replay_buffer.append(Transition(
-            torch.FloatTensor(state).to(self.device),
-            torch.LongTensor([action]).to(self.device),
-            torch.FloatTensor(skill).to(self.device),
-            torch.FloatTensor(next_state).to(self.device),
-            torch.FloatTensor([done]).to(self.device),
-            torch.FloatTensor([reward]).to(self.device)
-        ))
-        
+    def train(self, mode: bool = True) -> 'DIAYNAgent':
+        """Set the agent in training mode."""
+        super().train(mode)
+        self.encoder.train(mode)
+        self.policy.train(mode)
+        self.discriminator.train(mode)
+        return self
     
+    def eval(self) -> 'DIAYNAgent':
+        """Set the agent in evaluation mode."""
+        return self.train(False)
+    
+    def to(self, device) -> 'DIAYNAgent':
+        """Move the agent to the specified device."""
+        super().to(device)
+        self.encoder = self.encoder.to(device)
+        self.policy = self.policy.to(device)
+        self.discriminator = self.discriminator.to(device)
+        return self
+    
+    def store_transition(self, transition: Transition) -> None:
+        self.replay_buffer.append(transition)
 
-        
