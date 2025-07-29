@@ -2,36 +2,36 @@ import os
 import torch
 import numpy as np
 from tqdm import tqdm
-import gymnasium as gym
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
+from gymnasium.vector.sync_vector_env import SyncVectorEnv
 
 from src.agents.diayn_agent import DIAYNAgent
-from src.envs.minigrid_wrapper import MiniGridWrapper
 from src.utils.train_utils import parse_args, load_config, evaluate
-
+from src.utils.env_utils import make_env
 
 
 def train():
-
     args = parse_args()
     config = load_config(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    seed = config.get("seed", 42)
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    device_name = torch.cuda.get_device_name(device) if torch.cuda.is_available() else "CPU"
     
-    # Create environment
-    env = gym.make(config["env_id"], render_mode="rgb_array")
-    env = MiniGridWrapper(
-        env, 
-        obs_type=config.get("obs_type", "rgb"),
-    )
+    print(f"Using device: {device} | Device  Name: {device_name}")
+    # seed = config.get("seed", 42)
+    # torch.manual_seed(seed)
+    # np.random.seed(seed)
     
+    # Create  vectorized environments
+    num_envs = config.get("training", {}).get("env_parallel", 1)
+    env_thunks = [make_env(config["env_id"], config.get("obs_type", "rgb")) for _ in range(num_envs)]
+    print(env_thunks[0])
+    env = SyncVectorEnv(env_thunks) 
 
-    config["agent"]["obs_shape"] = env.observation_space["observation"].shape
-    config["agent"]["action_dim"] = env.action_space.n
+    sample_obs = env.reset()[0]  # env.reset() returns (obs, info)
+    print(sample_obs.shape)
+    config["agent"]["obs_shape"] = sample_obs.shape[1:]
+    config["agent"]["action_dim"] = env.action_space.nvec[0]
     
 
     # Create unique log directory with timestamp
@@ -46,15 +46,15 @@ def train():
 
     agent = DIAYNAgent(config["agent"], writer=writer, log_dir=log_dir).to(device)
     agent.log_model_graph()
-    
-    # Training parameters
+
     training_cfg = config.get("training", {})
-    num_episodes = training_cfg.get("num_episodes", 1000)
+    print(training_cfg.keys())
+    num_episodes = training_cfg.get("max_episodes", 1000)
     eval_interval = training_cfg.get("eval_interval", 100)
     save_interval = training_cfg.get("save_interval", 100)
     
     # Training loop
-    best_reward = -float('inf')
+    # best_reward = -float('inf')
     episode_rewards = []
     episode_lengths = []
     
@@ -80,6 +80,8 @@ def train():
             continue
         
         # Perform training step
+        writer.add_scalar('train/replay_buffer_size', len(agent.replay_buffer), episode)
+        writer.add_scalar('train/batch_size', agent.batch_size, episode)
         if len(agent.replay_buffer) >= agent.batch_size:
             try:
                 batch = agent.sample_batch(agent.batch_size)
@@ -89,10 +91,10 @@ def train():
                 # Update both discriminator and policy
                 loss_d, loss_p = agent.update(batch, episode)
                 
-                if writer is not None:
-                    writer.add_scalar('train/discriminator_loss', loss_d, episode)
-                    writer.add_scalar('train/policy_loss', loss_p, episode)
-                    writer.add_scalar('train/replay_buffer_size', len(agent.replay_buffer), episode)
+                # if writer is not None:
+                #     writer.add_scalar('train/discriminator_loss', loss_d, episode)
+                #     writer.add_scalar('train/policy_loss', loss_p, episode)
+                #     writer.add_scalar('train/replay_buffer_size', len(agent.replay_buffer), episode)
 
             except RuntimeError as e:
                 print(f"Error during training step: {str(e)}")

@@ -13,6 +13,7 @@ from src.models.encoder import MiniGridEncoder
 from src.models.descriminator import SkillDiscriminator
 
 
+
 Transition = namedtuple('Transition', 
                        ('state', 'action', 'skill', 'next_state', 'done', 'reward'))
 
@@ -52,7 +53,14 @@ class DIAYNAgent(BaseAgent):
         # Policy network
         self.policy = nn.Sequential(
             nn.Linear(self.encoder.feature_dim + self.skill_dim, 256),
-            nn.ReLU(),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.1),
+            nn.Linear(256, 512),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.1),
+            nn.Linear(512, 256),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.1),
             nn.Linear(256, self.action_dim)
         )
         
@@ -105,26 +113,60 @@ class DIAYNAgent(BaseAgent):
         """
         Select an action given an observation and skill.
         Args:
-            obs: Observation from the environment
-            skill: Skill vector
+            obs: Observation from the environment (can be dict or array-like)
+            skill: Skill vector (numpy array)
             deterministic: Whether to sample deterministically
             
         Returns:
             Action to take
         """
         with torch.no_grad():
-            obs_tensor = torch.FloatTensor(obs["observation"]).unsqueeze(0).to(self.device)
-            skill_tensor = torch.FloatTensor(skill).unsqueeze(0).to(self.device)
-            logits = self.forward(obs_tensor, skill_tensor)
-            
-            if deterministic:
-                action = torch.argmax(logits, dim=-1)
-            else:
-                probs = F.softmax(logits, dim=-1)
-                action = torch.multinomial(probs, num_samples=1)
+            try:
+                # Handle both dictionary and array observations
+                if isinstance(obs, dict) and 'observation' in obs:
+                    obs_data = obs['observation']
+                else:
+                    obs_data = obs
+                    
+                # Convert to tensor and ensure correct shape and device
+                obs_tensor = torch.as_tensor(obs_data, dtype=torch.float32, device=self.device)
+                if obs_tensor.dim() == 3:  # If image, add batch dimension
+                    obs_tensor = obs_tensor.unsqueeze(0)
+                    
+                # Convert skill to tensor
+                skill_tensor = torch.as_tensor(skill, dtype=torch.float32, device=self.device)
+                if skill_tensor.dim() == 1:  # Add batch dimension if needed
+                    skill_tensor = skill_tensor.unsqueeze(0)
                 
-            return action.item()
-    
+                # Get action logits
+                logits = self.forward(obs_tensor, skill_tensor)
+                
+                # Check for invalid logits
+                if torch.isnan(logits).any() or torch.isinf(logits).any():
+                    print("Warning: Invalid logits detected, using random action")
+                    return np.random.randint(0, self.action_dim)
+                
+                if deterministic:
+                    action = torch.argmax(logits, dim=-1)
+                else:
+                    # Clamp logits for numerical stability
+                    logits = torch.clamp(logits, min=-10, max=10)
+                    probs = F.softmax(logits, dim=-1)
+                    
+                    # Check for invalid probabilities
+                    if torch.isnan(probs).any() or torch.isinf(probs).any():
+                        print("Warning: Invalid probabilities detected, using uniform distribution")
+                        probs = torch.ones_like(logits) / logits.shape[-1]
+                    
+                    action = torch.multinomial(probs, num_samples=1)
+                
+                return action.item()
+                
+            except Exception as e:
+                print(f"Error in act(): {e}")
+                # Return random action as fallback
+                return np.random.randint(0, self.action_dim)
+        
     def update(self, batch: Dict[str, torch.Tensor], step: int) -> Tuple[float, float]:
         """Update the agent's parameters using a batch of experiences.
         
@@ -150,7 +192,11 @@ class DIAYNAgent(BaseAgent):
             
             # Train discriminator
             logits = self.discriminator(next_states_enc)
-            loss_d = F.cross_entropy(logits, skills.argmax(dim=-1))
+            target = skills.argmax(dim=-1)
+            if target.max() >= logits.size(1):
+                raise ValueError(f"Bad skill index {target.max()} vs {logits.size(1)}")
+
+            loss_d = F.cross_entropy(logits, target)
             
             # Train policy
             policy_input = torch.cat([states_enc, skills], dim=-1)
@@ -195,6 +241,7 @@ class DIAYNAgent(BaseAgent):
             self.writer.add_scalar('train/policy_loss', loss_p.item(), step)
             self.writer.add_scalar('train/entropy', entropy.mean().item(), step)
             self.writer.add_scalar('train/intrinsic_reward', intrinsic_reward.mean().item(), step)
+            
             
             # Log learning rates
             self.writer.add_scalar('lr/discriminator', self.scheduler_d.get_last_lr()[0], step)

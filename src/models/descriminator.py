@@ -1,10 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from src.models.base_model import BaseModel
 
 
-
-class SkillDiscriminator(nn.Module):
+class SkillDiscriminator(BaseModel):
     """Skill discriminator for DIAYN that classifies which skill was used."""
     
     def __init__(self, input_dim: int, skill_dim: int, hidden_dim: int = 256):
