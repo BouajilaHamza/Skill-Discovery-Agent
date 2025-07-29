@@ -18,7 +18,7 @@ Transition = namedtuple('Transition',
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="configs/diayn.yaml")
+    parser.add_argument("--config", type=str, default="/configs/diayn.yaml")
     parser.add_argument("--log_dir", type=str, default="logs")
     return parser.parse_args()
 
@@ -71,22 +71,94 @@ def collect_rollout(env: MiniGridWrapper, agent: DIAYNAgent, max_steps: int = 10
 
 
 
+def collect_parallel_rollout(env, agent: DIAYNAgent, max_steps: int = 1000) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Collect a rollout using vectorized environments.
+    
+    Args:
+        env: Vectorized environment (SyncVectorEnv or AsyncVectorEnv)
+        agent: DIAYN agent
+        max_steps: Maximum number of steps per episode
+    
+    Returns:
+        Tuple of (total_rewards, episode_lengths) arrays per environment
+    """
+    num_envs = env.num_envs
+    obs, _ = env.reset()
+    skills = np.array([agent.sample_skill() for _ in range(num_envs)], dtype=np.float32)
+
+    episode_rewards = np.zeros(num_envs, dtype=np.float32)
+    episode_lengths = np.zeros(num_envs, dtype=np.int32)
+    dones = np.zeros(num_envs, dtype=bool)
+
+    for _ in range(max_steps):
+        actions = []
+        for i in range(num_envs):
+            if not dones[i]:
+                action = agent.act(obs[i], skills[i])
+            else:
+                action = 0  # Dummy action for already-done envs
+            actions.append(action)
+
+        actions = np.array(actions)
+        next_obs, rewards, terminations, truncations, infos = env.step(actions)
+
+        step_dones = np.logical_or(terminations, truncations)
+
+        for i in range(num_envs):
+            if dones[i]:  # Skip if already done
+                continue
+
+            transition = Transition(
+                state=obs[i]['observation'] if isinstance(obs[i], dict) else obs[i],
+                action=actions[i],
+                skill=skills[i],
+                next_state=next_obs[i]['observation'] if isinstance(next_obs[i], dict) else next_obs[i],
+                done=step_dones[i],
+                reward=rewards[i]
+            )
+            agent.add_to_replay(transition)
+
+            episode_rewards[i] += rewards[i]
+            episode_lengths[i] += 1
+
+        dones = np.logical_or(dones, step_dones)
+        obs = next_obs
+
+        if np.all(dones):
+            break
+
+    return episode_rewards, episode_lengths
 
 
 
 
 
-def evaluate(env: MiniGridWrapper, agent: DIAYNAgent, num_episodes: int = 5,episode: int = 0, writer: Optional[SummaryWriter] = None) -> float:
-    """Evaluate the agent's performance."""
+
+
+def evaluate(env, agent: DIAYNAgent, num_episodes: int = 5, episode: int = 0, writer: Optional[SummaryWriter] = None) -> float:
+    """Evaluate the agent's performance on a vectorized environment."""
     agent.eval()
     eval_rewards = []
+    eval_lengths = []
     
-    for _ in range(num_episodes):
-        episode_reward, _ = collect_rollout(env, agent)
+    episodes_collected = 0
+    num_envs = env.num_envs
+
+    while episodes_collected < num_episodes:
+        rewards, lengths = collect_parallel_rollout(env, agent, max_steps=1000)
         
-        eval_rewards.append(episode_reward)
+        for r ,l in zip(rewards, lengths):
+            eval_rewards.append(r)
+            eval_lengths.append(l)
+            episodes_collected += 1
+            if episodes_collected >= num_episodes:
+                break
+
     avg_eval_reward = np.mean(eval_rewards)
     if writer:
         writer.add_scalar("eval/avg_reward", avg_eval_reward, episode)
+        writer.add_scalar("eval/avg_length", np.mean(eval_lengths), episode)
+    
     agent.train()
-    return np.mean(eval_rewards)
+    return avg_eval_reward
